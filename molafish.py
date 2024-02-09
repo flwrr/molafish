@@ -5,7 +5,7 @@ import time, math
 from itertools import count
 from collections import namedtuple, defaultdict
 
-version = "molafish v0.08"
+version = "molafish v0.09"
 
 ###############################################################################
 # Piece-Square tables. Tune these to change sunfish's behaviour
@@ -85,6 +85,7 @@ FILE_A, FILE_B = 0x0101010101010101, 0x202020202020202
 FILE_G, FILE_H = 0x4040404040404040, 0x8080808080808080
 RANK_1, RANK_2 = 0xff, 0xff00
 RANK_7, RANK_8 = 0xff000000000000, 0xff00000000000000
+PROMOTIONS = [3, 4, 2, 5]
 PAWN_RANKS = [RANK_2, RANK_7]
 ROOK_CORNERS = [[A1, H1], [A8, H8]]
 
@@ -145,6 +146,7 @@ directions = [
 # Attack tables - pregenerated LUTs for all pieces for all locations
 ###############################################################################
 
+
 def get_attacks(sq_list=None):
     # sq_list is a list of lists containing all rows of squares of the
     # board by either rank, file, or diagonal that will be iterated
@@ -175,6 +177,7 @@ def get_attacks(sq_list=None):
                     occupation ^= lowest
                 attack_table[current_bb][temp_bb] = moves
     return attack_table
+
 
 # Create rank, file, diagonal mask tables by tile. These are used
 # with a bitwise & to isolate occupancy by rank, file, or diagonal
@@ -278,75 +281,62 @@ class Position(namedtuple("Position", "board score wc bc ep kp player")):
         own_pieces = self.board[bw][0]
         opp_pieces = self.board[1 - bw][0]
         all_pieces = self.board[2]
-        castle_ok = (self.wc, self.bc)
-        pawn_1step = (n, s)
+        castle_ok = self.bc if bw == 1 else self.wc
+        ep_kp = self.ep | self.kp | (self.kp << 1) | (self.kp >> 1)
         for p, bb in enumerate(self.board[bw][1:], start=1):
+            # i,j are bitboard values here (1 set bit for location)
             while bb:
-                # i,j are bitboard values here (1 set bit for location)
-                # Isolate and clear least significant bit
+                # Store and clear least significant bit
                 i = bb & -bb
                 bb ^= i
-                # Pawn, Rook, King (precomputed)
-                if p in [1, 3, 6]:
-                    # Pawn
-                    if p == 1:
-                        # Pawn forward moves
-                        fwd_moves_bb = crawler_attacks[bw]['fwd'][i]
-                        while fwd_moves_bb:
-                            j = fwd_moves_bb & -fwd_moves_bb
-                            fwd_moves_bb ^= j
-                            if j & all_pieces: continue
-                            if all_pieces & pawn_1step[bw](i): continue
-                            if j & (RANK_1 | RANK_8):
-                                for prom in [3, 4, 2, 5]:  # N,B,R,Q
-                                    yield Move(i, j, prom, p, 0)
-                                continue
-                            yield Move(i, j, 0, p, 0)
-                        # Pawn capture moves
-                        cap_moves_bb = crawler_attacks[bw]['cap'][i]
-                        while cap_moves_bb:
-                            j = cap_moves_bb & -cap_moves_bb
-                            cap_moves_bb ^= j
-                            if (
-                                j & ~opp_pieces
-                                and j & ~(self.ep | self.kp | e(self.kp) | w(self.kp))
-                            ):
-                                continue
-                            if j & (RANK_1 | RANK_8):
-                                for prom in [3, 4, 2, 5]:  # N,B,R,Q
-                                    yield Move(i, j, prom, p, 0)
-                                continue
-                            yield Move(i, j, 0, p, 0)
-                    # Knight and King
-                    else:
-                        moves_bb = crawler_attacks[p][i]
-                        while moves_bb:
-                            j = moves_bb & -moves_bb
-                            moves_bb ^= j
-                            if j & own_pieces: continue
-                            yield Move(i, j, 0, p, 0)
-                else:
-                    # Rook, Bishop, Queen (sliders, pregenerated tables)
-                    moves_bb = 0
-                    if p in [2, 5]: # 2=Rook, 5=Queen
-                        moves_bb |= file_attacks[i][file_mask[i] & all_pieces] | \
-                                   rank_attacks[i][rank_mask[i] & all_pieces]
-                    if p in [4, 5]: # 4=Bishop, 5=Queen
-                        moves_bb |= diag_attacks_ne[i][diag_mask_ne[i] & all_pieces] | \
-                                   diag_attacks_nw[i][diag_mask_nw[i] & all_pieces]
-                    # Remove own pieces from bb from pregen table
-                    moves_bb &= ~own_pieces
+                # Pawn, Rook, King (crawlers, pregenerated tables)
+                if p == 1:      # 1=Pawn
+                    fwd1 = directions[bw][0](i)
+                    # Iterate through moves bitboard's bits
+                    moves_bb = crawler_attacks[bw]['fwd'][i] | \
+                               crawler_attacks[bw]['cap'][i]
                     while moves_bb:
                         j = moves_bb & -moves_bb
                         moves_bb ^= j
+                        if (j & file_mask[i]) and (all_pieces & (j | fwd1)):
+                            continue
+                        if j & ~(file_mask[i] | opp_pieces | ep_kp):
+                            continue
+                        if j & (RANK_1 | RANK_8):
+                            for prom in PROMOTIONS:  # N,B,R,Q
+                                yield Move(i, j, prom, p, 0)
+                            continue
                         yield Move(i, j, 0, p, 0)
-                        if j & opp_pieces: continue
-                        # Castling, by sliding the rook next to the king
-                        rook_a, rook_h = ROOK_CORNERS[bw][0], ROOK_CORNERS[bw][1]
-                        if i == rook_a and (e(j) & self.board[bw][6]) and castle_ok[bw][0]:
-                            yield Move(e(j), w(j), 0, 6, 0)
-                        if i == rook_h and (w(j) & self.board[bw][6]) and castle_ok[bw][1]:
-                            yield Move(w(j), e(j), 0, 6, 0)
+                    continue
+                if p in (3, 6):    # 3=Knight, 6=King
+                    moves_bb = crawler_attacks[p][i]
+                    while moves_bb:
+                        j = moves_bb & -moves_bb
+                        moves_bb ^= j
+                        if j & ~own_pieces:
+                            yield Move(i, j, 0, p, 0)
+                    continue
+                # Rook, Bishop, Queen (sliders, pregenerated tables)
+                moves_bb = 0
+                if p in (2, 5):    # 2=Rook, 5=Queen
+                    moves_bb |= file_attacks[i][file_mask[i] & all_pieces] | \
+                               rank_attacks[i][rank_mask[i] & all_pieces]
+                if p in (4, 5):    # 4=Bishop, 5=Queen
+                    moves_bb |= diag_attacks_ne[i][diag_mask_ne[i] & all_pieces] | \
+                               diag_attacks_nw[i][diag_mask_nw[i] & all_pieces]
+                # Remove own pieces from bb from pregen table
+                moves_bb &= ~own_pieces
+                while moves_bb:
+                    j = moves_bb & -moves_bb
+                    moves_bb ^= j
+                    yield Move(i, j, 0, p, 0)
+                    # Castling, by sliding the rook next to the king
+                    if i == ROOK_CORNERS[bw][0] and ((j << 1) & self.board[bw][6]) \
+                            and castle_ok[0] and j & ~opp_pieces:
+                        yield Move((j << 1), (j >> 1), 0, 6, 0)
+                    if i == ROOK_CORNERS[bw][1] and ((j >> 1) & self.board[bw][6]) \
+                            and castle_ok[1] and j & ~opp_pieces:
+                        yield Move((j >> 1), (j << 1), 0, 6, 0)
 
     def rotate(self, nullmove=False):
         # Rotates the board, preserving enpassant, unless nullmove.
@@ -367,8 +357,7 @@ class Position(namedtuple("Position", "board score wc bc ep kp player")):
         # Actual move (update bitboards)
         board[self.player][p] ^= origin | dest
         board[self.player][0] ^= origin | dest
-        # Update opponent's bitboards
-        if dest & board[opp_player][0]:
+        if dest & board[opp_player][0]:   # Update opponent's bitboards
             for p_type, bb in enumerate(board[1-self.player][1:], start=1):
                 if dest & bb:
                     board[opp_player][p_type] ^= dest
