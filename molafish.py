@@ -5,7 +5,7 @@ import time, math
 from itertools import count
 from collections import namedtuple, defaultdict
 
-version = "molafish v0.07"
+version = "molafish v0.08"
 
 ###############################################################################
 # Piece-Square tables. Tune these to change sunfish's behaviour
@@ -145,7 +145,6 @@ directions = [
 # Attack tables - pregenerated LUTs for all pieces for all locations
 ###############################################################################
 
-
 def get_attacks(sq_list=None):
     # sq_list is a list of lists containing all rows of squares of the
     # board by either rank, file, or diagonal that will be iterated
@@ -233,7 +232,6 @@ for p in [0, 1, 3, 6]:
         # Horse, King
         else:
             mt[i] = sum(d(i) for d in directions[p])
-
 
 # Mate value must be greater than 8*queen + 2*(rook+knight+bishop)
 # King value is set to twice this value such that if the opponent is
@@ -363,17 +361,18 @@ class Position(namedtuple("Position", "board score wc bc ep kp player")):
     def move(self, move):
         origin, dest, prom, p, q = move
         # Copy variables and reset ep and kp
+        opp_player = 1 - self.player
         board = [list(self.board[0]), list(self.board[1]), self.board[2]]
         cr, ep, kp = [self.wc, self.bc], 0, 0   # cr = castling rights
         # Actual move (update bitboards)
         board[self.player][p] ^= origin | dest
         board[self.player][0] ^= origin | dest
         # Update opponent's bitboards
-        if q == 0 and dest & self.board[1 - self.player][0]:
-            for p_type, bb in enumerate(board[1 - self.player][1:], start=1):
+        if dest & board[opp_player][0]:
+            for p_type, bb in enumerate(board[1-self.player][1:], start=1):
                 if dest & bb:
-                    board[1 - self.player][p_type] ^= dest
-                    board[1 - self.player][0] ^= dest
+                    board[opp_player][p_type] ^= dest
+                    board[opp_player][0] ^= dest
                     q = p_type
         score = self.score + self.value((origin, dest, prom, p, q))
         # Castling rights, we move the rook or capture the opponent's
@@ -403,8 +402,8 @@ class Position(namedtuple("Position", "board score wc bc ep kp player")):
                 ep = s(origin)
             if dest == self.ep:
                 ep_capture = s(self.ep) if self.player == 0 else n(self.ep)
-                board[1 - self.player][1] ^= ep_capture
-                board[1 - self.player][0] ^= ep_capture
+                board[opp_player][1] ^= ep_capture
+                board[opp_player][0] ^= ep_capture
         # Update all pieces bitboard
         board[2] = board[0][0] | board[1][0]
         return Position((tuple(board[0]), tuple(board[1]), board[2]),
@@ -423,7 +422,7 @@ class Position(namedtuple("Position", "board score wc bc ep kp player")):
         score = pst[self.player][p][j] - pst[self.player][p][i]
         # Capture
         if q:   # we could fill pst[0] with 0s to avoid branching
-            score += pst[1 - self.player][q][j]
+            score += pst[1-self.player][q][j]
         # Castling check detection (6=King)
         if self.kp and abs(j - (self.kp.bit_length()-1)) < 2:
             score += pst[self.player][6][j]
@@ -439,7 +438,7 @@ class Position(namedtuple("Position", "board score wc bc ep kp player")):
                 score += pst[self.player][prom][j] - pst[self.player][p][j]
             if dest & self.ep:
                 ep_capture = s(self.ep) if self.player == 0 else n(self.ep)
-                score += pst[1 - self.player][1][ep_capture.bit_length()-1]
+                score += pst[1-self.player][1][ep_capture.bit_length()-1]
         return score
 
 
