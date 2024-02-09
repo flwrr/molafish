@@ -5,7 +5,7 @@ import time, math
 from itertools import count
 from collections import namedtuple, defaultdict
 
-version = "molafish v0.01"
+version = "molafish v0.02"
 
 ###############################################################################
 # Piece-Square tables. Tune these to change sunfish's behaviour
@@ -68,16 +68,21 @@ pst = [
     for val in table[rank_start:rank_start+8]) for i, table in enumerate(pst)
 ]
 
+# Add mirrored pst tables for black pieces
+pst = pst + [table[::-1] for table in pst]
+
 ###############################################################################
 # Global constants
 ###############################################################################
 
 # Our board is represented as 14 64-bit integer bitboards.
 BOARD = 0xffffffffffffffff
-A1, H1, A8, H8 = 0x1, 0x80, (0x1 << 8*7), (0x80 << 8*7)
+A1, D1, F1, H1 = 0x1, 0x8, 0x20, 0x80
+A8, D8, F8, H8 = (A1 << 56), (D1 << 56), (F1 << 56), (H1 << 56)
 FILE_A, FILE_B = 0x0101010101010101, 0x202020202020202
 FILE_G, FILE_H = 0x4040404040404040, 0x8080808080808080
-RANK_2, RANK_8 = 0xff00, 0xff00000000000000
+RANK_1, RANK_2 = 0xff, 0xff00
+RANK_7, RANK_8 = 0xff000000000000, 0xff00000000000000
 
 initial = (
     0b11111111 << 8,        #  [0] White Pawn
@@ -110,8 +115,10 @@ def se(b): return e(s(b))
 def sw(b): return w(s(b))
 
 
+directions_pawn_white = [n, lambda b: n(n(b)), nw, ne]
+directions_pawn_black = [s, lambda b: s(s(b)), se, sw]
 directions = [
-    [n, lambda b: n(n(b)), nw, ne],             # [0] Pawn
+    [],                                         # [0] Pawn
     [n, e, s, w],                               # [1] Rook
     [lambda b: n(ne(b)), lambda b: e(ne(b)),
      lambda b: e(se(b)), lambda b: s(se(b)),
@@ -152,7 +159,7 @@ opt_ranges = dict(
 Move = namedtuple("Move", "i j prom")
 
 
-class Position(namedtuple("Position", "board score wc bc ep kp")):
+class Position(namedtuple("Position", "board score wc bc ep kp player")):
     """A state of a chess game
     board -- a 120 char representation of the board
     score -- the board evaluation
@@ -160,11 +167,33 @@ class Position(namedtuple("Position", "board score wc bc ep kp")):
     bc -- the opponent castling rights, [west/king side, east/queen side]
     ep - the en passant square (bitboard value)
     kp - the king passant square (bitboard value)
+    player - "White"/"Black"
     """
     def gen_moves(self):
-        own_pieces, opp_pieces, all_pieces = \
-            self.board[12], self.board[13], self.board[14]
-        for p, bb in enumerate(self.board[:6]):
+        all_pieces = self.board[14]
+        if self.player == "Black":
+            own_pieces, opp_pieces = self.board[13], self.board[12]
+            king_i, castle_ok = 11, self.bc
+            rook_a, rook_h = A8, H8
+            piece_bitboards = self.board[6:12]
+            # Black pawns
+            directions[0] = directions_pawn_black
+            step1, step2, captures = s, lambda b: s(s(b)), [sw, se]
+            start_rank, prom_rank = RANK_7, RANK_1
+            prom_pieces = [8, 9, 7, 10]  # N,B,R,Q
+        else:   # White
+            own_pieces, opp_pieces = self.board[12], self.board[13]
+            king_i, castle_ok = 5, self.wc
+            rook_a, rook_h = A1, H1
+            king_pos, castle_ok, rook_origins = self.board[5], self.wc, (A1, H1)
+            piece_bitboards = self.board[:6]
+            # White pawns
+            directions[0] = directions_pawn_white
+            step1, step2, captures = n, lambda b: n(n(b)), [nw, ne]
+            start_rank, prom_rank = RANK_2, RANK_8
+            prom_pieces = [2, 3, 1, 4]  # N,B,R,Q
+
+        for p, bb in enumerate(piece_bitboards):
             while bb:
                 # i,j are bitboard values here (1 set bit for location)
                 # Isolate and clear least significant bit
@@ -173,17 +202,18 @@ class Position(namedtuple("Position", "board score wc bc ep kp")):
                 for d in directions[p]:
                     j = d(i)
                     if not j or j & own_pieces: continue
+                    # TODO: Put pawn logic in a separate direction loop to handle b/w
                     if p == 0:
-                        if (j == n(i) or j == n(n(i))) and j & all_pieces: continue
-                        if j == n(n(i)) and (i & ~RANK_2 or n(i) & all_pieces): continue
+                        if (j == step1(i) or j == step2(i)) and j & all_pieces: continue
+                        if j == step2(i) and (i & ~start_rank or step1(i) & all_pieces): continue
                         if (
-                            d in [nw, ne] and j & ~opp_pieces
+                            d in captures and j & ~opp_pieces
                             and j & ~(self.ep | self.kp | self.kp << 1 | self.kp >> 1)
                         ):
                             continue
                         # promotion
-                        if j & RANK_8:
-                            for prom in [2, 3, 1, 4]:   # N,B,R,Q
+                        if j & prom_rank:
+                            for prom in prom_pieces:   # N,B,R,Q
                                 yield Move(i, j, prom)
                             continue
                         yield Move(i, j, 0)
@@ -196,76 +226,84 @@ class Position(namedtuple("Position", "board score wc bc ep kp")):
                             yield Move(i, j, 0)
                             if j & opp_pieces: break
                             # Castling, by sliding the rook next to the king
-                            if i == A1 and (e(j) & self.board[5]) and self.wc[0]:
+                            if i == rook_a and (e(j) & self.board[king_i]) and castle_ok[0]:
                                 yield Move(e(j), w(j), 0)
-                            if i == H1 and (w(j) & self.board[5]) and self.wc[1]:
+                            if i == rook_h and (w(j) & self.board[king_i]) and castle_ok[1]:
                                 yield Move(w(j), e(j), 0)
                             j = d(j)
 
     def rotate(self, nullmove=False):
-        # Rotates each bitboard by 180 degrees to switch perspectives
-        # Note: very beefy - performed on EVERY bitboard for EVERY move returned
-        rotated = []
-        for bb in self.board:
-            # Reverse the bits in the bitboard
-            bb = (bb & 0x5555555555555555) << 1 | (bb & 0xAAAAAAAAAAAAAAAA) >> 1
-            bb = (bb & 0x3333333333333333) << 2 | (bb & 0xCCCCCCCCCCCCCCCC) >> 2
-            bb = (bb & 0x0F0F0F0F0F0F0F0F) << 4 | (bb & 0xF0F0F0F0F0F0F0F0) >> 4
-            bb = (bb & 0x00FF00FF00FF00FF) << 8 | (bb & 0xFF00FF00FF00FF00) >> 8
-            bb = (bb & 0x0000FFFF0000FFFF) << 16 | (bb & 0xFFFF0000FFFF0000) >> 16
-            bb = (bb & 0x00000000FFFFFFFF) << 32 | (bb & 0xFFFFFFFF00000000) >> 32
-            rotated.append(bb)
-        # Swap the roles of white and black pieces
-        rotated[0:6], rotated[6:12] = rotated[6:12], rotated[0:6]
-        rotated[12], rotated[13] = rotated[13], rotated[12]
-        ep = 1 << (63 - (self.ep.bit_length()-1)) if self.ep and not nullmove else 0
-        kp = 1 << (63 - (self.kp.bit_length()-1)) if self.kp and not nullmove else 0
-        return Position(tuple(rotated), -self.score, self.bc, self.wc, ep, kp)
+        """Rotates the board, preserving enpassant, unless nullmove.
+        Only used in search logic - molafish's board does not rotate
+        """
+        return Position(
+            self.board, -self.score, self.wc, self.bc,
+            self.ep if self.ep and not nullmove else 0,
+            self.kp if self.kp and not nullmove else 0,
+            "Black" if self.player == "White" else "White"
+        )
 
     def move(self, move):
         origin, dest, prom = move
         p, q = None, None
         # Copy variables and reset ep and kp
+        # Should change to deep copy if board includes sublists for b/w
         board = list(self.board)
         wc, bc, ep, kp = self.wc, self.bc, 0, 0
         score = self.score + self.value(move)
         # Actual move
         for p_type, bb in enumerate(board[:12]):
             if dest & bb:
-                for i in [13, p_type]: board[i] ^= dest
+                board[p_type] ^= dest
+                board[12 + (p_type // 6)] ^= dest
                 q = p_type
             if origin & bb:
-                for i in [12, p_type]: board[i] ^= origin | dest
+                board[p_type] ^= origin | dest
+                board[12 + (p_type // 6)] ^= origin | dest
                 p = p_type
         # Castling rights, we move the rook or capture the opponent's
-        if origin == A1: wc = (False, wc[1])
-        if origin == H1: wc = (wc[0], False)
-        if dest == A8: bc = (bc[0], False)      # bc currently unused due to rotate?
-        if dest == H8: bc = (False, bc[1])
-        # Castling (5=King)
-        if p == 5:
-            wc = (False, False)
+        if origin == A1 or dest == A1: wc = (False, wc[1])
+        if origin == H1 or dest == H1: wc = (wc[0], False)
+        if origin == A8 or dest == A8: bc = (False, bc[1])
+        if origin == H8 or dest == H8: bc = (bc[0], False)
+        # Castling (5,11 = Kings)
+        if p == 5 or p == 11:
+            # TODO: These types of white/black if/else should be simplified
+            # if wc/bc were a tuple cr (wc,bc) and 'player' attribute == 0 or 1 we
+            # could just index the castling rights tuple using cr[self.player]
+            if self.player == "White":
+                wc = (False, False)
+            else:
+                bc = (False, False)
             if w(w(origin)) == dest or e(e(origin)) == dest:
-                kp = e(origin) if origin < dest else w(origin)
-                rk_orig, rk_dest = (H1, w(dest)) if origin < dest else (A1, e(dest))
-                for origin in [1, 12]: board[origin] ^= rk_orig | rk_dest
+                if origin < dest:   # Kingside
+                    kp, rk_orig, rk_dest = e(origin), e(dest), w(dest)
+                else:               # Queenside
+                    kp, rk_orig, rk_dest = w(origin), w(w(dest)), e(dest)
+                # Move rook
+                board[p - 4] ^= rk_orig | rk_dest   # p-4 gets rook index from king
+                board[12 + ((p - 4) // 6)] ^= rk_orig | rk_dest
         # Pawn (promotion, double move and en passant capture. 0=Pawn)
-        if p == 0:
-            if dest & RANK_8:
-                board[0] ^= dest
+        if p == 0 or p == 6:
+            if dest & (RANK_8 | RANK_1):
+                board[p] ^= dest
                 board[prom] |= dest
             if n(n(origin)) == dest:
                 ep = n(origin)
+            if s(s(origin)) == dest:
+                ep = s(origin)
             if dest == self.ep:
-                for origin in [6, 13]: board[origin] ^= s(self.ep)
+                ep_capture = n(self.ep) if p else s(self.ep)
+                board[6 - p] ^= ep_capture
+                board[13 - (p // 6)] ^= ep_capture
         # Update all pieces bitboard
         board[14] = board[12] | board[13]
-        # We rotate the returned position, so it's ready for the next player
-        return Position(tuple(board), score, wc, bc, ep, kp).rotate()
+        next_player = "Black" if self.player == "White" else "White"
+        return Position(tuple(board), -score, wc, bc, ep, kp, next_player)
 
     def value(self, move):
         origin, dest, prom = move
-        # convert origin and destination to indices (A1 = 0, H8 = 63)
+        # convert origin,destination to indices i,j (A1 = 0, H8 = 63)
         i, j = origin.bit_length()-1, dest.bit_length()-1
         p, q = None, None
         for p_type, bb in enumerate(self.board[:12]):
@@ -275,20 +313,24 @@ class Position(namedtuple("Position", "board score wc bc ep kp")):
         score = pst[p][j] - pst[p][i]
         # Capture
         if q is not None:
-            score += pst[q - 6][63 - j]
-        # Castling check detection (kp rotates)
+            score += pst[q][j]
+        # Castling check detection
         if self.kp and abs(j - (self.kp.bit_length()-1)) < 2:
-            score += pst[5][63 - j]
+            opp_king_i = 11 if self.player == "White" else 5
+            score += pst[opp_king_i][j]
         # Castling (5=King)
-        if p == 5 and abs(i - j) == 2:
-            score += pst[1][(i + j) // 2]
-            score -= pst[1][A1.bit_length()-1 if j < i else H1.bit_length()-1]
+        if (p == 5 or p == 11) and abs(i - j) == 2:
+            rook_i = 1 if self.player == "White" else 7
+            rook_a, rook_h = (A1, H1) if self.player == "White" else (A8, H8)
+            score += pst[rook_i][(i + j) // 2]
+            score -= pst[rook_i][rook_a.bit_length()-1 if j < i else rook_h.bit_length()-1]
         # Special pawn stuff
-        if p == 0:
-            if dest & RANK_8:
-                score += pst[prom][j] - pst[0][j]
+        if p == 0 or p == 6:
+            if dest & (RANK_8 | RANK_1):
+                score += pst[prom][j] - pst[p][j]
             if dest == self.ep:
-                score += pst[0][63 - (s(dest).bit_length()-1)]
+                ep_capture = n(self.ep) if p else s(self.ep)
+                score += pst[6 - p][ep_capture.bit_length()-1]
         return score
 
 
@@ -487,7 +529,7 @@ def render(bb):
     return coordinate
 
 
-hist = [Position(initial, 0, (True, True), (True, True), 0, 0)]
+hist = [Position(initial, 0, (True, True), (True, True), 0, 0, "White")]
 
 #input = raw_input
 
