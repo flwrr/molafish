@@ -5,7 +5,7 @@ import time, math
 from itertools import count
 from collections import namedtuple, defaultdict
 
-version = "molafish v0.04"
+version = "molafish v0.05"
 
 ###############################################################################
 # Piece-Square tables. Tune these to change sunfish's behaviour
@@ -118,19 +118,24 @@ def n(b): return b << 8 & BOARD
 def s(b): return b >> 8
 def e(b): return (b << 1) & ~FILE_A & BOARD
 def w(b): return (b >> 1) & ~FILE_H
+def nn(b): return n(n(b))
+def ss(b): return s(s(b))
+def ee(b): return e(e(b))
+def ww(b): return w(w(b))
 def ne(b): return e(n(b))
 def nw(b): return w(n(b))
 def se(b): return e(s(b))
 def sw(b): return w(s(b))
 
 
+# White/Black Pawn moves are added to direction[1] during move_gen()
 pawn_directions = [
-    [n, lambda b: n(n(b)), nw, ne],             # [0] White Pawn Moves
-    [s, lambda b: s(s(b)), se, sw]              # [1] Black Pawn Moves
+    [n, nn, nw, ne],             # [0] White Pawn Moves
+    [s, ss, se, sw]              # [1] Black Pawn Moves
 ]
 directions = [
-    [],                                         # [0]
-    [],                                         # [1] Pawn
+    [n, nn, nw, ne],                            # [0] White Pawn Moves
+    [s, ss, se, sw],                             # [1] Black Pawn Moves
     [n, e, s, w],                               # [2] Rook
     [lambda b: n(ne(b)), lambda b: e(ne(b)),
      lambda b: e(se(b)), lambda b: s(se(b)),
@@ -140,6 +145,21 @@ directions = [
     [n, e, s, w, ne, nw, se, sw],               # [5] Queen
     [n, e, s, w, ne, nw, se, sw]                # [6] King
 ]
+
+###############################################################################
+# Move tables
+###############################################################################
+
+move_table = [{},{},{},{},{},{},{}]
+# Crawlers (Knight, King)
+# Maybe instead of iterating through directions we should be or (|)ing all moves
+for p in [0, 1, 3, 6]:
+    for i in range(65):
+        pos = 1 << i
+        moves = 0
+        for d in directions[p]:
+            moves |= d(pos)
+        move_table[p][pos] = moves
 
 # Mate value must be greater than 8*queen + 2*(rook+knight+bishop)
 # King value is set to twice this value such that if the opponent is
@@ -195,39 +215,45 @@ class Position(namedtuple("Position", "board score wc bc ep kp player")):
                 # Isolate and clear least significant bit
                 i = bb & -bb
                 bb ^= i
-                for d in directions[p]:
-                    j = d(i)
-                    if not j or j & self.board[bw][0]: continue
-                    # TODO: Put pawn logic in a separate direction loop to handle b/w
-                    if p == 1:  # 1=Pawn
-                        if (j == step1(i) or j == step2(i)) and j & all_pieces: continue
-                        if j == step2(i) and (i & ~PAWN_RANKS[bw] or step1(i) & all_pieces): continue
-                        if (
-                            d in captures and j & ~opp_pieces
-                            and j & ~(self.ep | self.kp | self.kp << 1 | self.kp >> 1)
-                        ):
-                            continue
-                        # promotion
-                        if j & (RANK_1 | RANK_8):
-                            for prom in [3, 4, 2, 5]:   # N,B,R,Q
-                                yield Move(i, j, prom, p, 0)
-                            continue
-                        yield Move(i, j, 0, p, 0)
-                    # Knight and King
-                    elif p in [3, 6] and (j & ~own_pieces):
-                        yield Move(i, j, 0, p, 0)
-                    # Rook, Bishop, Queen (generate rays)
-                    else:
-                        while j & ~own_pieces:
+                # Knight and King
+                if p in [3, 6]:
+                    moves_bb = move_table[p][i]
+                    while moves_bb:
+                        j = moves_bb & -moves_bb
+                        if j & ~own_pieces:
                             yield Move(i, j, 0, p, 0)
-                            if j & opp_pieces: break
-                            # Castling, by sliding the rook next to the king
-                            rook_a, rook_h = ROOK_CORNERS[bw][0], ROOK_CORNERS[bw][1]
-                            if i == rook_a and (e(j) & self.board[bw][6]) and castle_ok[bw][0]:
-                                yield Move(e(j), w(j), 0, 6, 0)
-                            if i == rook_h and (w(j) & self.board[bw][6]) and castle_ok[bw][1]:
-                                yield Move(w(j), e(j), 0, 6, 0)
-                            j = d(j)
+                        moves_bb ^= j
+                else:
+                    for d in directions[p]:
+                        j = d(i)
+                        if not j or j & self.board[bw][0]: continue
+                        # TODO: Put pawn logic in a separate direction loop to handle b/w
+                        if p == 1:  # 1=Pawn
+                            if (j == step1(i) or j == step2(i)) and j & all_pieces: continue
+                            if j == step2(i) and (i & ~PAWN_RANKS[bw] or step1(i) & all_pieces): continue
+                            if (
+                                d in captures and j & ~opp_pieces
+                                and j & ~(self.ep | self.kp | self.kp << 1 | self.kp >> 1)
+                            ):
+                                continue
+                            # promotion
+                            if j & (RANK_1 | RANK_8):
+                                for prom in [3, 4, 2, 5]:   # N,B,R,Q
+                                    yield Move(i, j, prom, p, 0)
+                                continue
+                            yield Move(i, j, 0, p, 0)
+                        # Rook, Bishop, Queen (generate rays)
+                        else:
+                            while j & ~own_pieces:
+                                yield Move(i, j, 0, p, 0)
+                                if j & opp_pieces: break
+                                # Castling, by sliding the rook next to the king
+                                rook_a, rook_h = ROOK_CORNERS[bw][0], ROOK_CORNERS[bw][1]
+                                if i == rook_a and (e(j) & self.board[bw][6]) and castle_ok[bw][0]:
+                                    yield Move(e(j), w(j), 0, 6, 0)
+                                if i == rook_h and (w(j) & self.board[bw][6]) and castle_ok[bw][1]:
+                                    yield Move(w(j), e(j), 0, 6, 0)
+                                j = d(j)
 
     def rotate(self, nullmove=False):
         # Rotates the board, preserving enpassant, unless nullmove.
@@ -291,8 +317,8 @@ class Position(namedtuple("Position", "board score wc bc ep kp player")):
 
     def value(self, move):
         origin, dest, prom, p, q = move
-        if q == 0 and dest & self.board[1-self.player][0]:
-            for p_type, bb in enumerate(self.board[1-self.player][1:], start=1):
+        if q == 0 and dest & self.board[1 - self.player][0]:
+            for p_type, bb in enumerate(self.board[1 - self.player][1:], start=1):
                 if dest & bb:
                     q = p_type
                     break
