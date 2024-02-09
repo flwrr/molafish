@@ -5,118 +5,130 @@ import time, math
 from itertools import count
 from collections import namedtuple, defaultdict
 
-# If we could rely on the env -S argument, we could just use "pypy3 -u"
-# as the shebang to unbuffer stdout. But alas we have to do this instead:
-#from functools import partial
-#print = partial(print, flush=True)
-
-version = "sunfish 2023"
+version = "molafish v0.01"
 
 ###############################################################################
 # Piece-Square tables. Tune these to change sunfish's behaviour
 ###############################################################################
-
-# With xz compression this whole section takes 652 bytes.
-# That's pretty good given we have 64*6 = 384 values.
-# Though probably we could do better...
-# For one thing, they could easily all fit into int8.
-piece = {"P": 100, "N": 280, "B": 320, "R": 479, "Q": 929, "K": 60000}
-pst = {
-    'P': (   0,   0,   0,   0,   0,   0,   0,   0,
-            78,  83,  86,  73, 102,  82,  85,  90,
-             7,  29,  21,  44,  40,  31,  44,   7,
-           -17,  16,  -2,  15,  14,   0,  15, -13,
-           -26,   3,  10,   9,   6,   1,   0, -23,
-           -22,   9,   5, -11, -10,  -2,   3, -19,
-           -31,   8,  -7, -37, -36, -14,   3, -31,
-             0,   0,   0,   0,   0,   0,   0,   0),
-    'N': ( -66, -53, -75, -75, -10, -55, -58, -70,
-            -3,  -6, 100, -36,   4,  62,  -4, -14,
-            10,  67,   1,  74,  73,  27,  62,  -2,
-            24,  24,  45,  37,  33,  41,  25,  17,
-            -1,   5,  31,  21,  22,  35,   2,   0,
-           -18,  10,  13,  22,  18,  15,  11, -14,
-           -23, -15,   2,   0,   2,   0, -23, -20,
-           -74, -23, -26, -24, -19, -35, -22, -69),
-    'B': ( -59, -78, -82, -76, -23,-107, -37, -50,
-           -11,  20,  35, -42, -39,  31,   2, -22,
-            -9,  39, -32,  41,  52, -10,  28, -14,
-            25,  17,  20,  34,  26,  25,  15,  10,
-            13,  10,  17,  23,  17,  16,   0,   7,
-            14,  25,  24,  15,   8,  25,  20,  15,
-            19,  20,  11,   6,   7,   6,  20,  16,
-            -7,   2, -15, -12, -14, -15, -10, -10),
-    'R': (  35,  29,  33,   4,  37,  33,  56,  50,
-            55,  29,  56,  67,  55,  62,  34,  60,
-            19,  35,  28,  33,  45,  27,  25,  15,
-             0,   5,  16,  13,  18,  -4,  -9,  -6,
-           -28, -35, -16, -21, -13, -29, -46, -30,
-           -42, -28, -42, -25, -25, -35, -26, -46,
-           -53, -38, -31, -26, -29, -43, -44, -53,
-           -30, -24, -18,   5,  -2, -18, -31, -32),
-    'Q': (   6,   1,  -8,-104,  69,  24,  88,  26,
-            14,  32,  60, -10,  20,  76,  57,  24,
-            -2,  43,  32,  60,  72,  63,  43,   2,
-             1, -16,  22,  17,  25,  20, -13,  -6,
-           -14, -15,  -2,  -5,  -1, -10, -20, -22,
-           -30,  -6, -13, -11, -16, -11, -16, -27,
-           -36, -18,   0, -19, -15, -15, -21, -38,
-           -39, -30, -31, -13, -31, -36, -34, -42),
-    'K': (   4,  54,  47, -99, -99,  60,  83, -62,
-           -32,  10,  55,  56,  56,  55,  10,   3,
-           -62,  12, -57,  44, -67,  28,  37, -31,
-           -55,  50,  11,  -4, -19,  13,   0, -49,
-           -55, -43, -52, -28, -51, -47,  -8, -50,
-           -47, -42, -43, -79, -64, -32, -29, -32,
-            -4,   3, -14, -50, -57, -18,  13,   4,
-            17,  30,  -3, -14,   6,  -1,  40,  18),
-}
-# Pad tables and join piece and pst dictionaries
-for k, table in pst.items():
-    padrow = lambda row: (0,) + tuple(x + piece[k] for x in row) + (0,)
-    pst[k] = sum((padrow(table[i * 8 : i * 8 + 8]) for i in range(8)), ())
-    pst[k] = (0,) * 20 + pst[k] + (0,) * 20
+# TODO: Compression test
+piece = [100, 479, 280, 320, 929, 60000]        # P,R,N,B,Q,K
+pst = [
+    (    0,   0,   0,   0,   0,   0,   0,   0,  # [0] Pawn
+        78,  83,  86,  73, 102,  82,  85,  90,
+         7,  29,  21,  44,  40,  31,  44,   7,
+       -17,  16,  -2,  15,  14,   0,  15, -13,
+       -26,   3,  10,   9,   6,   1,   0, -23,
+       -22,   9,   5, -11, -10,  -2,   3, -19,
+       -31,   8,  -7, -37, -36, -14,   3, -31,
+         0,   0,   0,   0,   0,   0,   0,  0),
+    (   35,  29,  33,   4,  37,  33,  56,  50,  # [1] Rook
+        55,  29,  56,  67,  55,  62,  34,  60,
+        19,  35,  28,  33,  45,  27,  25,  15,
+         0,   5,  16,  13,  18,  -4,  -9,  -6,
+       -28, -35, -16, -21, -13, -29, -46, -30,
+       -42, -28, -42, -25, -25, -35, -26, -46,
+       -53, -38, -31, -26, -29, -43, -44, -53,
+       -30, -24, -18,   5,  -2, -18, -31, -32),
+    (  -66, -53, -75, -75, -10, -55, -58, -70,  # [2] Knight
+        -3,  -6, 100, -36,   4,  62,  -4, -14,
+        10,  67,   1,  74,  73,  27,  62,  -2,
+        24,  24,  45,  37,  33,  41,  25,  17,
+        -1,   5,  31,  21,  22,  35,   2,   0,
+       -18,  10,  13,  22,  18,  15,  11, -14,
+       -23,  -15,   2,   0,   2,   0, -23,-20,
+       -74, -23, -26, -24, -19, -35, -22, -69),
+    (  -59, -78, -82, -76, -23,-107, -37, -50,  # [3] Bishop
+       -11,  20,  35, -42, -39,  31,   2, -22,
+        -9,  39, -32,  41,  52, -10,  28, -14,
+        25,  17,  20,  34,  26,  25,  15,  10,
+        13,  10,  17,  23,  17,  16,   0,   7,
+        14,  25,  24,  15,   8,  25,  20,  15,
+        19,  20,  11,   6,   7,   6,  20,  16,
+        -7,   2, -15, -12, -14, -15, -10, -10),
+    (    6,   1,  -8,-104,  69,  24,  88,  26,  # [4] Queen
+        14,  32,  60, -10,  20,  76,  57,  24,
+        -2,  43,  32,  60,  72,  63,  43,   2,
+         1, -16,  22,  17,  25,  20, -13,  -6,
+       -14, -15,  -2,  -5,  -1, -10, -20, -22,
+       -30,  -6, -13, -11, -16, -11, -16, -27,
+       -36, -18,   0, -19, -15, -15, -21, -38,
+       -39, -30, -31, -13, -31, -36, -34, -42),
+    (    4,  54,  47, -99, -99,  60,  83, -62,   # [5] King
+       -32,  10,  55,  56,  56,  55,  10,   3,
+       -62,  12, -57,  44, -67,  28,  37, -31,
+       -55,  50,  11,  -4, -19,  13,   0, -49,
+       -55, -43, -52, -28, -51, -47,  -8, -50,
+       -47, -42, -43, -79, -64, -32, -29, -32,
+        -4,   3, -14, -50, -57, -18,  13,   4,
+        17,  30,  -3, -14,   6,  -1,  40,  18),
+]
+# Reorder PST to 'Little-Endian File-Rank Mapping' (A1=[0], H8=[63])
+pst = [
+    tuple(val + piece[i] for rank_start in range(56, -1, -8)
+    for val in table[rank_start:rank_start+8]) for i, table in enumerate(pst)
+]
 
 ###############################################################################
 # Global constants
 ###############################################################################
 
-# Our board is represented as a 120 character string. The padding allows for
-# fast detection of moves that don't stay within the board.
-A1, H1, A8, H8 = 91, 98, 21, 28
+# Our board is represented as 14 64-bit integer bitboards.
+BOARD = 0xffffffffffffffff
+A1, H1, A8, H8 = 0x1, 0x80, (0x1 << 8*7), (0x80 << 8*7)
+FILE_A, FILE_B = 0x0101010101010101, 0x202020202020202
+FILE_G, FILE_H = 0x4040404040404040, 0x8080808080808080
+RANK_2, RANK_8 = 0xff00, 0xff00000000000000
+
 initial = (
-    "         \n"  #   0 -  9
-    "         \n"  #  10 - 19
-    " rnbqkbnr\n"  #  20 - 29
-    " pppppppp\n"  #  30 - 39
-    " ........\n"  #  40 - 49
-    " ........\n"  #  50 - 59
-    " ........\n"  #  60 - 69
-    " ........\n"  #  70 - 79
-    " PPPPPPPP\n"  #  80 - 89
-    " RNBQKBNR\n"  #  90 - 99
-    "         \n"  # 100 -109
-    "         \n"  # 110 -119
+    0b11111111 << 8,        #  [0] White Pawn
+    0b10000001,             #  [1] White Rook
+    0b01000010,             #  [2] White Knight
+    0b00100100,             #  [3] White Bishop
+    0b00001000,             #  [4] White Queen
+    0b00010000,             #  [5] White King
+    0b11111111 << (8 * 6),  #  [6] Black Pawn
+    0b10000001 << (8 * 7),  #  [7] Black Rook
+    0b01000010 << (8 * 7),  #  [8] Black Knight
+    0b00100100 << (8 * 7),  #  [9] Black Bishop
+    0b00001000 << (8 * 7),  # [10] Black Queen
+    0b00010000 << (8 * 7),  # [11] Black King
+    0xffff,                 # [12] All White Pieces
+    0xffff000000000000,     # [13] All Black Pieces
+    0xffff00000000ffff      # [14] All Pieces
 )
 
+
 # Lists of possible moves for each piece type.
-N, E, S, W = -10, 1, 10, -1
-directions = {
-    "P": (N, N+N, N+W, N+E),
-    "N": (N+N+E, E+N+E, E+S+E, S+S+E, S+S+W, W+S+W, W+N+W, N+N+W),
-    "B": (N+E, S+E, S+W, N+W),
-    "R": (N, E, S, W),
-    "Q": (N, E, S, W, N+E, S+E, S+W, N+W),
-    "K": (N, E, S, W, N+E, S+E, S+W, N+W)
-}
+# Note: nested lamda functions probably have high overhead.
+def n(b): return b << 8 & BOARD
+def s(b): return b >> 8
+def e(b): return (b << 1) & ~FILE_A & BOARD
+def w(b): return (b >> 1) & ~FILE_H
+def ne(b): return e(n(b))
+def nw(b): return w(n(b))
+def se(b): return e(s(b))
+def sw(b): return w(s(b))
+
+
+directions = [
+    [n, lambda b: n(n(b)), nw, ne],             # [0] Pawn
+    [n, e, s, w],                               # [1] Rook
+    [lambda b: n(ne(b)), lambda b: e(ne(b)),
+     lambda b: e(se(b)), lambda b: s(se(b)),
+     lambda b: s(sw(b)), lambda b: w(sw(b)),
+     lambda b: w(nw(b)), lambda b: n(nw(b))],   # [2] Knight
+    [ne, nw, se, sw],                           # [3] Bishop
+    [n, e, s, w, ne, nw, se, sw],               # [4] Queen
+    [n, e, s, w, ne, nw, se, sw],               # [5] King
+]
 
 # Mate value must be greater than 8*queen + 2*(rook+knight+bishop)
 # King value is set to twice this value such that if the opponent is
 # 8 queens up, but we got the king, we still exceed MATE_VALUE.
 # When a MATE is detected, we'll set the score to MATE_UPPER - plies to get there
 # E.g. Mate in 3 will be MATE_UPPER - 6
-MATE_LOWER = piece["K"] - 10 * piece["Q"]
-MATE_UPPER = piece["K"] + 10 * piece["Q"]
+MATE_LOWER = piece[5] - 10 * piece[4]
+MATE_UPPER = piece[5] + 10 * piece[4]
 
 # Constants for tuning search
 QS = 40
@@ -146,113 +158,137 @@ class Position(namedtuple("Position", "board score wc bc ep kp")):
     score -- the board evaluation
     wc -- the castling rights, [west/queen side, east/king side]
     bc -- the opponent castling rights, [west/king side, east/queen side]
-    ep - the en passant square
-    kp - the king passant square
+    ep - the en passant square (bitboard value)
+    kp - the king passant square (bitboard value)
     """
-
     def gen_moves(self):
-        # For each of our pieces, iterate through each possible 'ray' of moves,
-        # as defined in the 'directions' map. The rays are broken e.g. by
-        # captures or immediately in case of pieces such as knights.
-        for i, p in enumerate(self.board):
-            if not p.isupper():
-                continue
-            for d in directions[p]:
-                for j in count(i + d, d):
-                    q = self.board[j]
-                    # Stay inside the board, and off friendly pieces
-                    if q.isspace() or q.isupper():
-                        break
-                    # Pawn move, double move and capture
-                    if p == "P":
-                        if d in (N, N + N) and q != ".": break
-                        if d == N + N and (i < A1 + N or self.board[i + N] != "."): break
+        own_pieces, opp_pieces, all_pieces = \
+            self.board[12], self.board[13], self.board[14]
+        for p, bb in enumerate(self.board[:6]):
+            while bb:
+                # i,j are bitboard values here (1 set bit for location)
+                # Isolate and clear least significant bit
+                i = bb & -bb
+                bb ^= i
+                for d in directions[p]:
+                    j = d(i)
+                    if not j or j & own_pieces: continue
+                    if p == 0:
+                        if (j == n(i) or j == n(n(i))) and j & all_pieces: continue
+                        if j == n(n(i)) and (i & ~RANK_2 or n(i) & all_pieces): continue
                         if (
-                            d in (N + W, N + E)
-                            and q == "."
-                            and j not in (self.ep, self.kp, self.kp - 1, self.kp + 1)
-                            #and j != self.ep and abs(j - self.kp) >= 2
+                            d in [nw, ne] and j & ~opp_pieces
+                            and j & ~(self.ep | self.kp | self.kp << 1 | self.kp >> 1)
                         ):
-                            break
-                        # If we move to the last row, we can be anything
-                        if A8 <= j <= H8:
-                            for prom in "NBRQ":
+                            continue
+                        # promotion
+                        if j & RANK_8:
+                            for prom in [2, 3, 1, 4]:   # N,B,R,Q
                                 yield Move(i, j, prom)
-                            break
-                    # Move it
-                    yield Move(i, j, "")
-                    # Stop crawlers from sliding, and sliding after captures
-                    if p in "PNK" or q.islower():
-                        break
-                    # Castling, by sliding the rook next to the king
-                    if i == A1 and self.board[j + E] == "K" and self.wc[0]:
-                        yield Move(j + E, j + W, "")
-                    if i == H1 and self.board[j + W] == "K" and self.wc[1]:
-                        yield Move(j + W, j + E, "")
+                            continue
+                        yield Move(i, j, 0)
+                    # Knight and King
+                    elif p in [2, 5] and (j & ~own_pieces):
+                        yield Move(i, j, 0)
+                    # Rook, Bishop, Queen (generate rays)
+                    else:
+                        while j & ~own_pieces:
+                            yield Move(i, j, 0)
+                            if j & opp_pieces: break
+                            # Castling, by sliding the rook next to the king
+                            if i == A1 and (e(j) & self.board[5]) and self.wc[0]:
+                                yield Move(e(j), w(j), 0)
+                            if i == H1 and (w(j) & self.board[5]) and self.wc[1]:
+                                yield Move(w(j), e(j), 0)
+                            j = d(j)
 
     def rotate(self, nullmove=False):
-        """Rotates the board, preserving enpassant, unless nullmove"""
-        return Position(
-            self.board[::-1].swapcase(), -self.score, self.bc, self.wc,
-            119 - self.ep if self.ep and not nullmove else 0,
-            119 - self.kp if self.kp and not nullmove else 0,
-        )
+        # Rotates each bitboard by 180 degrees to switch perspectives
+        # Note: very beefy - performed on EVERY bitboard for EVERY move returned
+        rotated = []
+        for bb in self.board:
+            # Reverse the bits in the bitboard
+            bb = (bb & 0x5555555555555555) << 1 | (bb & 0xAAAAAAAAAAAAAAAA) >> 1
+            bb = (bb & 0x3333333333333333) << 2 | (bb & 0xCCCCCCCCCCCCCCCC) >> 2
+            bb = (bb & 0x0F0F0F0F0F0F0F0F) << 4 | (bb & 0xF0F0F0F0F0F0F0F0) >> 4
+            bb = (bb & 0x00FF00FF00FF00FF) << 8 | (bb & 0xFF00FF00FF00FF00) >> 8
+            bb = (bb & 0x0000FFFF0000FFFF) << 16 | (bb & 0xFFFF0000FFFF0000) >> 16
+            bb = (bb & 0x00000000FFFFFFFF) << 32 | (bb & 0xFFFFFFFF00000000) >> 32
+            rotated.append(bb)
+        # Swap the roles of white and black pieces
+        rotated[0:6], rotated[6:12] = rotated[6:12], rotated[0:6]
+        rotated[12], rotated[13] = rotated[13], rotated[12]
+        ep = 1 << (63 - (self.ep.bit_length()-1)) if self.ep and not nullmove else 0
+        kp = 1 << (63 - (self.kp.bit_length()-1)) if self.kp and not nullmove else 0
+        return Position(tuple(rotated), -self.score, self.bc, self.wc, ep, kp)
 
     def move(self, move):
-        i, j, prom = move
-        p, q = self.board[i], self.board[j]
-        put = lambda board, i, p: board[:i] + p + board[i + 1 :]
+        origin, dest, prom = move
+        p, q = None, None
         # Copy variables and reset ep and kp
-        board = self.board
+        board = list(self.board)
         wc, bc, ep, kp = self.wc, self.bc, 0, 0
         score = self.score + self.value(move)
         # Actual move
-        board = put(board, j, board[i])
-        board = put(board, i, ".")
+        for p_type, bb in enumerate(board[:12]):
+            if dest & bb:
+                for i in [13, p_type]: board[i] ^= dest
+                q = p_type
+            if origin & bb:
+                for i in [12, p_type]: board[i] ^= origin | dest
+                p = p_type
         # Castling rights, we move the rook or capture the opponent's
-        if i == A1: wc = (False, wc[1])
-        if i == H1: wc = (wc[0], False)
-        if j == A8: bc = (bc[0], False)
-        if j == H8: bc = (False, bc[1])
-        # Castling
-        if p == "K":
+        if origin == A1: wc = (False, wc[1])
+        if origin == H1: wc = (wc[0], False)
+        if dest == A8: bc = (bc[0], False)      # bc currently unused due to rotate?
+        if dest == H8: bc = (False, bc[1])
+        # Castling (5=King)
+        if p == 5:
             wc = (False, False)
-            if abs(j - i) == 2:
-                kp = (i + j) // 2
-                board = put(board, A1 if j < i else H1, ".")
-                board = put(board, kp, "R")
-        # Pawn promotion, double move and en passant capture
-        if p == "P":
-            if A8 <= j <= H8:
-                board = put(board, j, prom)
-            if j - i == 2 * N:
-                ep = i + N
-            if j == self.ep:
-                board = put(board, j + S, ".")
+            if w(w(origin)) == dest or e(e(origin)) == dest:
+                kp = e(origin) if origin < dest else w(origin)
+                rk_orig, rk_dest = (H1, w(dest)) if origin < dest else (A1, e(dest))
+                for origin in [1, 12]: board[origin] ^= rk_orig | rk_dest
+        # Pawn (promotion, double move and en passant capture. 0=Pawn)
+        if p == 0:
+            if dest & RANK_8:
+                board[0] ^= dest
+                board[prom] |= dest
+            if n(n(origin)) == dest:
+                ep = n(origin)
+            if dest == self.ep:
+                for origin in [6, 13]: board[origin] ^= s(self.ep)
+        # Update all pieces bitboard
+        board[14] = board[12] | board[13]
         # We rotate the returned position, so it's ready for the next player
-        return Position(board, score, wc, bc, ep, kp).rotate()
+        return Position(tuple(board), score, wc, bc, ep, kp).rotate()
 
     def value(self, move):
-        i, j, prom = move
-        p, q = self.board[i], self.board[j]
+        origin, dest, prom = move
+        # convert origin and destination to indices (A1 = 0, H8 = 63)
+        i, j = origin.bit_length()-1, dest.bit_length()-1
+        p, q = None, None
+        for p_type, bb in enumerate(self.board[:12]):
+            if origin & bb: p = p_type
+            if dest & bb: q = p_type
         # Actual move
         score = pst[p][j] - pst[p][i]
         # Capture
-        if q.islower():
-            score += pst[q.upper()][119 - j]
-        # Castling check detection
-        if abs(j - self.kp) < 2:
-            score += pst["K"][119 - j]
-        # Castling
-        if p == "K" and abs(i - j) == 2:
-            score += pst["R"][(i + j) // 2]
-            score -= pst["R"][A1 if j < i else H1]
+        if q is not None:
+            score += pst[q - 6][63 - j]
+        # Castling check detection (kp rotates)
+        if self.kp and abs(j - (self.kp.bit_length()-1)) < 2:
+            score += pst[5][63 - j]
+        # Castling (5=King)
+        if p == 5 and abs(i - j) == 2:
+            score += pst[1][(i + j) // 2]
+            score -= pst[1][A1.bit_length()-1 if j < i else H1.bit_length()-1]
         # Special pawn stuff
-        if p == "P":
-            if A8 <= j <= H8:
-                score += pst[prom][j] - pst["P"][j]
-            if j == self.ep:
-                score += pst["P"][119 - (j + S)]
+        if p == 0:
+            if dest & RANK_8:
+                score += pst[prom][j] - pst[0][j]
+            if dest == self.ep:
+                score += pst[0][63 - (s(dest).bit_length()-1)]
         return score
 
 
@@ -437,63 +473,27 @@ class Searcher:
 
 
 def parse(c):
+    # file and rank coordinate to bitboard
     fil, rank = ord(c[0]) - ord("a"), int(c[1]) - 1
-    return A1 + fil - 10 * rank
+    return 0b1 << fil + rank*8
 
 
-def render(i):
-    rank, fil = divmod(i - A1, 10)
-    return chr(fil + ord("a")) + str(-rank + 1)
+def render(bb):
+    # bitboard coordinate to file and rank
+    pos = bb.bit_length() - 1
+    rank = pos // 8
+    file = pos % 8
+    coordinate = chr(file + ord('A')) + str(rank + 1)
+    return coordinate
+
 
 hist = [Position(initial, 0, (True, True), (True, True), 0, 0)]
 
 #input = raw_input
 
-# minifier-hide start
-import sys, tools.uci
-tools.uci.run(sys.modules[__name__], hist[-1])
-sys.exit()
-# minifier-hide end
-
-searcher = Searcher()
-while True:
-    args = input().split()
-    if args[0] == "uci":
-        print("id name", version)
-        print("uciok")
-
-    elif args[0] == "isready":
-        print("readyok")
-
-    elif args[0] == "quit":
-        break
-
-    elif args[:2] == ["position", "startpos"]:
-        del hist[1:]
-        for ply, move in enumerate(args[3:]):
-            i, j, prom = parse(move[:2]), parse(move[2:4]), move[4:].upper()
-            if ply % 2 == 1:
-                i, j = 119 - i, 119 - j
-            hist.append(hist[-1].move(Move(i, j, prom)))
-
-    elif args[0] == "go":
-        wtime, btime, winc, binc = [int(a) / 1000 for a in args[2::2]]
-        if len(hist) % 2 == 0:
-            wtime, winc = btime, binc
-        think = min(wtime / 40 + winc, wtime / 2 - 1)
-
-        start = time.time()
-        move_str = None
-        for depth, gamma, score, move in Searcher().search(hist):
-            # The only way we can be sure to have the real move in tp_move,
-            # is if we have just failed high.
-            if score >= gamma:
-                i, j = move.i, move.j
-                if len(hist) % 2 == 0:
-                    i, j = 119 - i, 119 - j
-                move_str = render(i) + render(j) + move.prom.lower()
-                print("info depth", depth, "score cp", score, "pv", move_str)
-            if move_str and time.time() - start > think * 0.8:
-                break
-
-        print("bestmove", move_str or '(none)')
+if __name__ == '__main__':
+    # minifier-hide start
+    import sys, tools.uci
+    tools.uci.run(sys.modules[__name__], hist[-1])
+    sys.exit()
+    # minifier-hide end
