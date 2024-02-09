@@ -5,7 +5,7 @@ import time, math
 from itertools import count
 from collections import namedtuple, defaultdict
 
-version = "molafish v0.10"
+version = "molafish v0.11"
 
 ###############################################################################
 # Piece-Square tables. Tune these to change sunfish's behaviour
@@ -13,7 +13,7 @@ version = "molafish v0.10"
 # TODO: Compression test
 piece = [0, 100, 479, 280, 320, 929, 60000]     # P,R,N,B,Q,K
 pst = [
-    (),                                         # [0] empty for indexing
+    tuple(0 for _ in range(64)),                # [0] None
     (    0,   0,   0,   0,   0,   0,   0,   0,  # [1] Pawn
         78,  83,  86,  73, 102,  82,  85,  90,
          7,  29,  21,  44,  40,  31,  44,   7,
@@ -66,12 +66,19 @@ pst = [
 # Reorder PST to 'Little-Endian File-Rank Mapping' (A1=[0], H8=[63])
 pst = [
     tuple(val + piece[i] for rank_start in range(56, -1, -8)
-    for val in table[rank_start:rank_start+8]) for i, table in enumerate(pst)
+    for val in table[rank_start:rank_start+8])
+    for i, table in enumerate(pst)
 ]
-
 # Add mirrored pst tables for black pieces
 # as a new list to match white/black indexing
 pst = [pst, [table[::-1] for table in pst]]
+
+
+# (Currently not needed / seemed to slowed down 'value' method)
+# # Convert each list in the nested list structure to a dictionary
+# pst = [[{1 << i: score for i, score in enumerate(piece_table)}
+#         for piece_table in color] for color in pst]
+
 
 ###############################################################################
 # Global constants
@@ -139,20 +146,16 @@ def n(b): return b << 8 & BOARD
 def s(b): return b >> 8
 def e(b): return (b << 1) & ~FILE_A & BOARD
 def w(b): return (b >> 1) & ~FILE_H
-def nn(b): return n(n(b))
-def ss(b): return s(s(b))
-def ee(b): return e(e(b))
-def ww(b): return w(w(b))
 def ne(b): return e(n(b))
 def nw(b): return w(n(b))
 def se(b): return e(s(b))
 def sw(b): return w(s(b))
 
 
-# White/Black Pawn moves are added to direction[1] during move_gen()
+# Rook, Bishop, Queen lists are unused since attack tables were added.
 directions = [
-    [n, nn, nw, ne],                            # [0] White Pawn Moves
-    [s, ss, se, sw],                            # [1] Black Pawn Moves
+    [n, lambda b: n(n(b)), nw, ne],             # [0] White Pawn Moves
+    [s, lambda b: s(s(b)), se, sw],             # [1] Black Pawn Moves
     [n, e, s, w],                               # [2] Rook
     [lambda b: n(ne(b)), lambda b: e(ne(b)),
      lambda b: e(se(b)), lambda b: s(se(b)),
@@ -189,7 +192,6 @@ for p in [0, 1, 3, 6]:
 # Slider attack tables (Rook, Bishop, Queen).
 # No magic or rotation. Uses Sam Tannous's method:
 # "Avoiding Rotated Bitboards with Direct Lookup"
-
 def get_attacks(sq_list=None):
     # sq_list is a list of lists containing all rows of squares of the
     # board by either rank, file, or diagonal that will be iterated
@@ -220,6 +222,7 @@ def get_attacks(sq_list=None):
                     occupation ^= lowest
                 attack_table[current_bb][occ_bb] = moves
     return attack_table
+
 
 # Create rank, file, diagonal mask tables by tile. These are used
 # with a bitwise & to isolate occupancy by rank, file, or diagonal
@@ -353,85 +356,84 @@ class Position(namedtuple("Position", "board score wc bc ep kp player")):
         )
 
     def move(self, move):
-        origin, dest, prom, p, q = move
-        # Copy variables and reset ep and kp
         opp_player = 1 - self.player
+        i, j, prom, p, q = move
+        # Copy variables and reset ep and kp
         board = [list(self.board[0]), list(self.board[1]), self.board[2]]
         cr, ep, kp = [self.wc, self.bc], 0, 0   # cr = castling rights
         # Actual move (update bitboards)
-        board[self.player][p] ^= origin | dest
-        board[self.player][0] ^= origin | dest
+        board[self.player][p] ^= i | j
+        board[self.player][0] ^= i | j
         # Update opponent's bitboards
-        if dest & board[opp_player][0]:
+        if j & board[opp_player][0]:
             for p_type, bb in enumerate(board[1-self.player][1:], start=1):
-                if dest & bb:
-                    board[opp_player][p_type] ^= dest
-                    board[opp_player][0] ^= dest
+                if j & bb:
+                    board[opp_player][p_type] ^= j
+                    board[opp_player][0] ^= j
                     q = p_type
-        score = self.score + self.value((origin, dest, prom, p, q))
+                    break
+        score = self.score + self.value((i, j, prom, p, q))
         # Castling rights, we move the rook or capture the opponent's
-        if origin == A1 or dest == A1: cr[0] = (False, cr[0][1])
-        if origin == H1 or dest == H1: cr[0] = (cr[0][0], False)
-        if origin == A8 or dest == A8: cr[1] = (False, cr[1][1])
-        if origin == H8 or dest == H8: cr[1] = (cr[1][0], False)
-        # Castling (6=King)
-        if p == 6:
+        if (i | j) & A1: cr[0] = (False, cr[0][1])
+        if (i | j) & H1: cr[0] = (cr[0][0], False)
+        if (i | j) & A8: cr[1] = (False, cr[1][1])
+        if (i | j) & H8: cr[1] = (cr[1][0], False)
+        # Castling
+        if p == 6:  # King(6)
+            # Moving king negates castling rights
             cr[self.player] = (False, False)
-            if w(w(origin)) == dest or e(e(origin)) == dest:
-                if origin < dest:   # Kingside
-                    kp, rk_orig, rk_dest = e(origin), e(dest), w(dest)
-                else:               # Queenside
-                    kp, rk_orig, rk_dest = w(origin), w(w(dest)), e(dest)
-                # Move rook (2=Rook)
-                board[self.player][2] ^= rk_orig | rk_dest
-                board[self.player][0] ^= rk_orig | rk_dest
-        # Pawn (promotion, double move and en passant capture. 0=Pawn)
-        if p == 1:
-            if dest & (RANK_8 | RANK_1):
-                board[self.player][p] ^= dest
-                board[self.player][prom] |= dest
-            if n(n(origin)) == dest:
-                ep = n(origin)
-            if s(s(origin)) == dest:
-                ep = s(origin)
-            if dest == self.ep:
-                ep_capture = s(self.ep) if self.player == 0 else n(self.ep)
-                board[opp_player][1] ^= ep_capture
-                board[opp_player][0] ^= ep_capture
+            if ((i >> 2) & j) | ((i << 2) & j):
+                if i > j:   # Queenside castling
+                    kp = (i >> 1)
+                    board[self.player][2] ^= (j >> 2) | (j << 1)
+                    board[self.player][0] ^= (j >> 2) | (j << 1)
+                else:       # Kingside castling
+                    kp = (i << 1)
+                    board[self.player][2] ^= (j << 1) | (j >> 1)
+                    board[self.player][0] ^= (j << 1) | (j >> 1)
+        # Pawn (promotion, double move and en passant capture)
+        if p == 1:  # Pawn(1)
+            if j & (RANK_8 | RANK_1):
+                board[self.player][p] ^= j
+                board[self.player][prom] |= j
+            # If pawn moves forward 2, assign enpassant square
+            if j & directions[self.player][1](i):
+                ep = directions[self.player][0](i)
+            if j & self.ep:
+                board[opp_player][1] ^= directions[opp_player][0](self.ep)
+                board[opp_player][0] ^= directions[opp_player][0](self.ep)
         # Update all pieces bitboard
         board[2] = board[0][0] | board[1][0]
         return Position((tuple(board[0]), tuple(board[1]), board[2]),
                         -score, cr[0], cr[1], ep, kp, (self.player ^ 1))
 
     def value(self, move):
-        origin, dest, prom, p, q = move
-        if q == 0 and dest & self.board[1-self.player][0]:
+        i, j, prom, p, q = move
+        if q == 0 and j & self.board[1-self.player][0]:
             for p_type, bb in enumerate(self.board[1-self.player][1:], start=1):
-                if dest & bb:
+                if j & bb:
                     q = p_type
                     break
-        # convert origin,destination to indices i,j (A1 = 0, H8 = 63)
-        i, j = origin.bit_length()-1, dest.bit_length()-1
-        # Actual move
-        score = pst[self.player][p][j] - pst[self.player][p][i]
-        # Capture
-        if q:   # we could fill pst[0] with 0s to avoid branching
-            score += pst[1-self.player][q][j]
+        # convert i,j to indices: origin,dest (A1 = 0, H8 = 63)
+        origin, dest = i.bit_length()-1, j.bit_length()-1
+        # Actual move and capture
+        score = pst[self.player][p][dest] - pst[self.player][p][origin]
+        score += pst[1-self.player][q][dest] if q else 0
         # Castling check detection (6=King)
-        if self.kp and abs(j - (self.kp.bit_length()-1)) < 2:
-            score += pst[self.player][6][j]
+        if self.kp and j & (self.kp | (self.kp >> 1) | (self.kp << 1)):
+            score += pst[self.player][6][dest]
         # Castling (6=King, 2=Rook)
-        if p == 6 and abs(i - j) == 2:
+        if p == 6 and abs(origin - dest) == 2:
             rook_square = ROOK_CORNERS[self.player][0] \
-                if j < i else ROOK_CORNERS[self.player][1]
-            score += pst[self.player][2][(i + j) // 2]
+                if dest < origin else ROOK_CORNERS[self.player][1]
+            score += pst[self.player][2][(origin + dest) // 2]
             score -= pst[self.player][2][rook_square.bit_length()-1]
         # Special pawn stuff (1=Pawn)
         if p == 1:
-            if dest & (RANK_8 | RANK_1):
-                score += pst[self.player][prom][j] - pst[self.player][p][j]
-            if dest & self.ep:
-                ep_capture = s(self.ep) if self.player == 0 else n(self.ep)
+            if j & (RANK_8 | RANK_1):
+                score += pst[self.player][prom][dest] - pst[self.player][p][dest]
+            if j & self.ep:
+                ep_capture = (self.ep << 8) if self.player else (self.ep >> 8)
                 score += pst[1-self.player][1][ep_capture.bit_length()-1]
         return score
 
