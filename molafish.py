@@ -5,15 +5,15 @@ import time, math
 from itertools import count
 from collections import namedtuple, defaultdict
 
-version = "molafish v0.09"
+version = "molafish v0.10"
 
 ###############################################################################
 # Piece-Square tables. Tune these to change sunfish's behaviour
 ###############################################################################
 # TODO: Compression test
-piece = [0, 100, 479, 280, 320, 929, 60000]        # P,R,N,B,Q,K
+piece = [0, 100, 479, 280, 320, 929, 60000]     # P,R,N,B,Q,K
 pst = [
-    (),     # [0] empty for indexing
+    (),                                         # [0] empty for indexing
     (    0,   0,   0,   0,   0,   0,   0,   0,  # [1] Pawn
         78,  83,  86,  73, 102,  82,  85,  90,
          7,  29,  21,  44,  40,  31,  44,   7,
@@ -76,6 +76,27 @@ pst = [pst, [table[::-1] for table in pst]]
 ###############################################################################
 # Global constants
 ###############################################################################
+
+# Mate value must be greater than 8*queen + 2*(rook+knight+bishop)
+# King value is set to twice this value such that if the opponent is
+# 8 queens up, but we got the king, we still exceed MATE_VALUE.
+# When a MATE is detected, we'll set the score to MATE_UPPER - plies to get there
+# E.g. Mate in 3 will be MATE_UPPER - 6
+MATE_LOWER = piece[6] - 10 * piece[5]
+MATE_UPPER = piece[6] + 10 * piece[5]
+
+# Constants for tuning search
+QS = 40
+QS_A = 140
+EVAL_ROUGHNESS = 15
+
+# minifier-hide start
+opt_ranges = dict(
+    QS = (0, 300),
+    QS_A = (0, 300),
+    EVAL_ROUGHNESS = (0, 50),
+)
+# minifier-hide end
 
 # Our board is represented by 14 64-bit integer bitboards.
 BOARD = 0xffffffffffffffff
@@ -146,78 +167,6 @@ directions = [
 # Attack tables - pregenerated LUTs for all pieces for all locations
 ###############################################################################
 
-
-def get_attacks(sq_list=None):
-    # sq_list is a list of lists containing all rows of squares of the
-    # board by either rank, file, or diagonal that will be iterated
-    # over to find attacks  in those row for every board square.
-    # Used for generating sliding move tables.
-    attack_table, attack_table[0], attack_table[0][0] = {}, {}, 0
-    for i in range(len(sq_list)):
-        n = len(sq_list[i])
-        for current_pos in range(n):
-            current_bb = sq_list[i][current_pos]
-            attack_table[current_bb] = {}
-            for occupation in range(1 << n):
-                moves, temp_bb = 0, 0
-                # Right side attacks
-                for newsquare in range(current_pos+1,n):
-                    moves |= sq_list[i][newsquare]
-                    if ((1 << newsquare) & occupation):
-                        break
-                # Left side attacks
-                for newsquare in range(current_pos-1,-1,-1):
-                    moves |= sq_list[i][newsquare]
-                    if (1 << newsquare) & occupation:
-                        break
-                # Final moves output
-                while occupation:
-                    lowest = occupation & -occupation
-                    temp_bb |= sq_list[i][lowest.bit_length() - 1]
-                    occupation ^= lowest
-                attack_table[current_bb][temp_bb] = moves
-    return attack_table
-
-
-# Create rank, file, diagonal mask tables by tile. These are used
-# with a bitwise & to isolate occupancy by rank, file, or diagonal
-# to be used as a key for the attack tables generated. [tile][occupancy]
-rank_mask, file_mask, diag_mask_ne, diag_mask_nw = {}, {}, {}, {}
-
-for rank in range(8):
-    for file in range(8):
-        tile = 1 << (rank * 8 + file)
-        rank_mask[tile] = 0xFF << (8 * rank)
-        file_mask[tile] = 0x0101010101010101 << file
-        # Diagonal Masks (NE and NW)
-        diag_mask_ne[tile], diag_mask_nw[tile] = 0, 0
-        for r in range(8):
-            f_ne = file - rank + r
-            f_nw = file + rank - r
-            if 0 <= f_ne < 8:
-                diag_mask_ne[tile] |= 1 << (r * 8 + f_ne)
-            if 0 <= f_nw < 8:
-                diag_mask_nw[tile] |= 1 << (r * 8 + f_nw)
-
-# Create attack tables dictionaries by [current piece tile][masked board occupancy]
-# Generates tables seen in Sam Tannous's "Avoiding Rotated Bitboards with Direct Lookup"
-vals_file, vals_rank, vals_diag_ne, vals_diag_nw  = [], [], [], []
-for i in range(8):
-    # Create input values for attack tables
-    vals_file.append([1 << (8 * j + i) for j in range(8)])
-    vals_rank.append([1 << (j + 8 * i) for j in range(8)])
-    vals_diag_ne.insert(0, [1 << ((7 - j) + (8 * (7 - j - i))) for j in range(8 - i)])
-    vals_diag_ne.append([1 << (7 - j - i) + (8 * (7 - j)) for j in range(8 - i)])
-    vals_diag_nw.insert(0, [1 << ((7 - j - i) + (8 * j)) for j in range(8 - i)])
-    vals_diag_nw.append([1 << ((7 - j) + (8 * (j + i))) for j in range(8 - i)])
-# Remove redundant rows
-for val_list in [vals_diag_ne, vals_diag_nw]: val_list.pop(8)
-# Final attack tables
-file_attacks    = get_attacks(vals_file)
-rank_attacks    = get_attacks(vals_rank)
-diag_attacks_ne = get_attacks(vals_diag_ne)
-diag_attacks_nw = get_attacks(vals_diag_nw)
-
 # Crawler attack tables (wPawn, bPawn, Knight, King)
 crawler_attacks = [{'fwd':{}, 'cap':{}},  # [0] White Pawn forwards and captures
                    {'fwd':{}, 'cap':{}},  # [1] Black Pawn forwards and captures
@@ -236,26 +185,79 @@ for p in [0, 1, 3, 6]:
         else:
             mt[i] = sum(d(i) for d in directions[p])
 
-# Mate value must be greater than 8*queen + 2*(rook+knight+bishop)
-# King value is set to twice this value such that if the opponent is
-# 8 queens up, but we got the king, we still exceed MATE_VALUE.
-# When a MATE is detected, we'll set the score to MATE_UPPER - plies to get there
-# E.g. Mate in 3 will be MATE_UPPER - 6
-MATE_LOWER = piece[6] - 10 * piece[5]
-MATE_UPPER = piece[6] + 10 * piece[5]
 
-# Constants for tuning search
-QS = 40
-QS_A = 140
-EVAL_ROUGHNESS = 15
+# Slider attack tables (Rook, Bishop, Queen).
+# No magic or rotation. Uses Sam Tannous's method:
+# "Avoiding Rotated Bitboards with Direct Lookup"
 
-# minifier-hide start
-opt_ranges = dict(
-    QS = (0, 300),
-    QS_A = (0, 300),
-    EVAL_ROUGHNESS = (0, 50),
-)
-# minifier-hide end
+def get_attacks(sq_list=None):
+    # sq_list is a list of lists containing all rows of squares of the
+    # board by either rank, file, or diagonal that will be iterated
+    # over to find attacks in those row for every square on the board.
+    # Returns an attack table dictionary for a sliding piece.
+    attack_table, attack_table[0], attack_table[0][0] = {}, {}, 0
+    for i in range(len(sq_list)):
+        n = len(sq_list[i])
+        for current_pos in range(n):
+            current_bb = sq_list[i][current_pos]
+            attack_table[current_bb] = {}
+            for occupation in range(1 << n):
+                moves, occ_bb = 0, 0
+                # Right side attacks
+                for newsquare in range(current_pos+1,n):
+                    moves |= sq_list[i][newsquare]
+                    if ((1 << newsquare) & occupation):
+                        break
+                # Left side attacks
+                for newsquare in range(current_pos-1,-1,-1):
+                    moves |= sq_list[i][newsquare]
+                    if (1 << newsquare) & occupation:
+                        break
+                # Final moves output
+                while occupation:
+                    lowest = occupation & -occupation
+                    occ_bb |= sq_list[i][lowest.bit_length() - 1]
+                    occupation ^= lowest
+                attack_table[current_bb][occ_bb] = moves
+    return attack_table
+
+# Create rank, file, diagonal mask tables by tile. These are used
+# with a bitwise & to isolate occupancy by rank, file, or diagonal
+# to be used as a key for the attack tables generated: [tile][occupancy]
+rank_mask, file_mask, diag_mask_ne, diag_mask_nw = {}, {}, {}, {}
+for rank in range(8):
+    for file in range(8):
+        tile = 1 << (rank * 8 + file)
+        rank_mask[tile] = 0xFF << (8 * rank)
+        file_mask[tile] = 0x0101010101010101 << file
+        # Diagonal Masks (NE and NW)
+        diag_mask_ne[tile], diag_mask_nw[tile] = 0, 0
+        for r in range(8):
+            f_ne = file - rank + r
+            f_nw = file + rank - r
+            if 0 <= f_ne < 8:
+                diag_mask_ne[tile] |= 1 << (r * 8 + f_ne)
+            if 0 <= f_nw < 8:
+                diag_mask_nw[tile] |= 1 << (r * 8 + f_nw)
+
+# Create attack tables dictionaries sorted by the bitboard integer
+# values as keys: [current piece tile][masked board occupancy]
+vals_file, vals_rank, vals_diag_ne, vals_diag_nw  = [], [], [], []
+for i in range(8):
+    # Create input values for attack tables
+    vals_file.append([1 << (8 * j + i) for j in range(8)])
+    vals_rank.append([1 << (j + 8 * i) for j in range(8)])
+    vals_diag_ne.insert(0, [1 << ((7 - j) + (8 * (7 - j - i))) for j in range(8 - i)])
+    vals_diag_ne.append([1 << (7 - j - i) + (8 * (7 - j)) for j in range(8 - i)])
+    vals_diag_nw.insert(0, [1 << ((7 - j - i) + (8 * j)) for j in range(8 - i)])
+    vals_diag_nw.append([1 << ((7 - j) + (8 * (j + i))) for j in range(8 - i)])
+# Remove redundant rows
+for val_list in [vals_diag_ne, vals_diag_nw]: val_list.pop(8)
+# Final attack tables
+file_attacks    = get_attacks(vals_file)
+rank_attacks    = get_attacks(vals_rank)
+diag_attacks_ne = get_attacks(vals_diag_ne)
+diag_attacks_nw = get_attacks(vals_diag_nw)
 
 
 ###############################################################################
@@ -274,69 +276,71 @@ class Position(namedtuple("Position", "board score wc bc ep kp player")):
     bc -- the opponent castling rights, [west/king side, east/queen side]
     ep - the en passant square (bitboard value)
     kp - the king passant square (bitboard value)
-    player - boolean: 0=White, 1=Black
+    player - boolean: 0=White, 1=Black - used to index bitboards and moves
     """
     def gen_moves(self):
-        bw = self.player    # black/white 0/1
+        # For each piece type and color, iterate through the corresponding bitboard.
+        # Each set bit in each bitboard represents a piece location. Use the piece
+        # type and piece location as keys to look up pregenerated moves.
+        bw = self.player
         own_pieces = self.board[bw][0]
         opp_pieces = self.board[1 - bw][0]
         all_pieces = self.board[2]
         castle_ok = self.bc if bw == 1 else self.wc
         ep_kp = self.ep | self.kp | (self.kp << 1) | (self.kp >> 1)
+        # Iterate through all of current player's piece bitboards
         for p, bb in enumerate(self.board[bw][1:], start=1):
-            # i,j are bitboard values here (1 set bit for location)
+            # i,j are bitboard integer values here (1 set bit for location)
             while bb:
                 # Store and clear least significant bit
                 i = bb & -bb
                 bb ^= i
-                # Pawn, Rook, King (crawlers, pregenerated tables)
-                if p == 1:      # 1=Pawn
-                    fwd1 = directions[bw][0](i)
-                    # Iterate through moves bitboard's bits
-                    moves_bb = crawler_attacks[bw]['fwd'][i] | \
-                               crawler_attacks[bw]['cap'][i]
+                # Crawling pieces (pregenerated tables)
+                if p == 1:  # Pawn(1)
+                    moves_bb = crawler_attacks[bw]['cap'][i] & (opp_pieces | ep_kp)
+                    # Only add forward moves if forward square is empty
+                    if directions[bw][0](i) & ~all_pieces:
+                        moves_bb |= crawler_attacks[bw]['fwd'][i] & ~all_pieces
                     while moves_bb:
                         j = moves_bb & -moves_bb
                         moves_bb ^= j
-                        if (j & file_mask[i]) and (all_pieces & (j | fwd1)):
-                            continue
-                        if j & ~(file_mask[i] | opp_pieces | ep_kp):
-                            continue
+                        # Pawn promotions
                         if j & (RANK_1 | RANK_8):
-                            for prom in PROMOTIONS:  # N,B,R,Q
+                            for prom in [2, 3, 4, 5]:
                                 yield Move(i, j, prom, p, 0)
                             continue
                         yield Move(i, j, 0, p, 0)
                     continue
-                if p in (3, 6):    # 3=Knight, 6=King
-                    moves_bb = crawler_attacks[p][i]
+                if p in (3, 6):     # Knight(3), King(6)
+                    moves_bb = crawler_attacks[p][i] & ~own_pieces
                     while moves_bb:
                         j = moves_bb & -moves_bb
+                        yield Move(i, j, 0, p, 0)
                         moves_bb ^= j
-                        if j & ~own_pieces:
-                            yield Move(i, j, 0, p, 0)
                     continue
-                # Rook, Bishop, Queen (sliders, pregenerated tables)
+                # Sliding pieces (pregenerated tables)
+                # Queen gets both rook and bishop moves
                 moves_bb = 0
-                if p in (2, 5):    # 2=Rook, 5=Queen
+                if p in (2, 5):     # Rook(2), Queen(5)
                     moves_bb |= file_attacks[i][file_mask[i] & all_pieces] | \
                                rank_attacks[i][rank_mask[i] & all_pieces]
-                if p in (4, 5):    # 4=Bishop, 5=Queen
+                if p in (4, 5):     # Bishop(4), Queen(5)
                     moves_bb |= diag_attacks_ne[i][diag_mask_ne[i] & all_pieces] | \
                                diag_attacks_nw[i][diag_mask_nw[i] & all_pieces]
-                # Remove own pieces from bb from pregen table
+                # Remove self-captures - tables do not distinguish between colors
                 moves_bb &= ~own_pieces
                 while moves_bb:
                     j = moves_bb & -moves_bb
                     moves_bb ^= j
                     yield Move(i, j, 0, p, 0)
-                    # Castling, by sliding the rook next to the king
-                    if i == ROOK_CORNERS[bw][0] and ((j << 1) & self.board[bw][6]) \
-                            and castle_ok[0] and j & ~opp_pieces:
-                        yield Move((j << 1), (j >> 1), 0, 6, 0)
-                    if i == ROOK_CORNERS[bw][1] and ((j >> 1) & self.board[bw][6]) \
-                            and castle_ok[1] and j & ~opp_pieces:
-                        yield Move((j >> 1), (j << 1), 0, 6, 0)
+                    if p == 2:
+                        # Castling, by sliding the rook next to the king. (6=King)
+                        if i == ROOK_CORNERS[bw][0] and ((j << 1) & self.board[bw][6]) \
+                                and castle_ok[0] and j & ~opp_pieces:
+                            yield Move((j << 1), (j >> 1), 0, 6, 0)
+                        if i == ROOK_CORNERS[bw][1] and ((j >> 1) & self.board[bw][6]) \
+                                and castle_ok[1] and j & ~opp_pieces:
+                            yield Move((j >> 1), (j << 1), 0, 6, 0)
 
     def rotate(self, nullmove=False):
         # Rotates the board, preserving enpassant, unless nullmove.
@@ -357,7 +361,8 @@ class Position(namedtuple("Position", "board score wc bc ep kp player")):
         # Actual move (update bitboards)
         board[self.player][p] ^= origin | dest
         board[self.player][0] ^= origin | dest
-        if dest & board[opp_player][0]:   # Update opponent's bitboards
+        # Update opponent's bitboards
+        if dest & board[opp_player][0]:
             for p_type, bb in enumerate(board[1-self.player][1:], start=1):
                 if dest & bb:
                     board[opp_player][p_type] ^= dest
@@ -400,8 +405,8 @@ class Position(namedtuple("Position", "board score wc bc ep kp player")):
 
     def value(self, move):
         origin, dest, prom, p, q = move
-        if q == 0 and dest & self.board[1 - self.player][0]:
-            for p_type, bb in enumerate(self.board[1 - self.player][1:], start=1):
+        if q == 0 and dest & self.board[1-self.player][0]:
+            for p_type, bb in enumerate(self.board[1-self.player][1:], start=1):
                 if dest & bb:
                     q = p_type
                     break
