@@ -7,23 +7,41 @@ from functools import partial
 
 print = partial(print, flush=True)
 
+INDEX_TO_PIECE = ["ERR", "P", "R", "N", "B", "Q", "K"]
+PIECE_TO_INDEX = {'P': 1, 'R': 2, 'N': 3, 'B': 4, 'Q': 5, 'K': 6}
 
-def render_move(move, white_pov):
+
+def render_move(move):
     if move is None:
         return "(none)"
     i, j = move.i, move.j
-    if not white_pov:
-        i, j = 119 - i, 119 - j
-    render = sunfish.render
-    return render(i) + render(j) + move.prom.lower()
+    prom = "" if move.prom == 0 else INDEX_TO_PIECE[move.prom]
+    render = molafish.render
+    return render(i) + render(j) + prom
 
 
-def parse_move(move_str, white_pov):
-    parse = sunfish.parse
-    i, j, prom = parse(move_str[:2]), parse(move_str[2:4]), move_str[4:].upper()
-    if not white_pov:
-        i, j = 119 - i, 119 - j
-    return sunfish.Move(i, j, prom)
+def parse_move(move_str, pos):
+    parse = molafish.parse
+    i, j, prom = parse(move_str[:2]), parse(move_str[2:4]), 0
+    if move_str[-1].isalpha():
+        prom = PIECE_TO_INDEX[move_str[4:].upper()]
+
+    # Get moved piece
+    p = 0
+    for piece_type, bb in enumerate(pos.board[pos.player][1:], start=1):
+        if i & bb:
+            p = piece_type
+            break
+
+    # Get any captured piece
+    q = 0
+    if j & pos.board[1 - pos.player][0]:
+        for piece_type, bb in enumerate(pos.board[1 - pos.player][1:], start=1):
+            if j & bb:
+                q = piece_type
+                break
+
+    return molafish.Move(i, j, prom, p, q)
 
 
 def go_loop(searcher, hist, stop_event, max_movetime=0, max_depth=0, debug=False):
@@ -47,7 +65,7 @@ def go_loop(searcher, hist, stop_event, max_movetime=0, max_depth=0, debug=False
         }
         if score >= gamma:
             fields["score cp"] = f"{score} lowerbound"
-            best_move = render_move(move, white_pov=len(hist) % 2 == 1)
+            best_move = render_move(move)
             fields["pv"] = " ".join(pv(searcher, hist[-1], include_scores=False))
         else:
             fields["score cp"] = f"{score} upperbound"
@@ -69,13 +87,13 @@ def go_loop(searcher, hist, stop_event, max_movetime=0, max_depth=0, debug=False
 
 
 def mate_loop(
-    searcher,
-    hist,
-    stop_event,
-    max_movetime=0,
-    max_depth=0,
-    find_draw=False,
-    debug=False,
+        searcher,
+        hist,
+        stop_event,
+        max_movetime=0,
+        max_depth=0,
+        find_draw=False,
+        debug=False,
 ):
     start = time.time()
     for d in range(int(max_depth) + 1):
@@ -89,7 +107,7 @@ def mate_loop(
             if s0 >= 0 and s1 < 1:
                 break
         else:
-            score = searcher.bound(hist[-1], sunfish.MATE_LOWER, d)
+            score = searcher.bound(hist[-1], molafish.MATE_LOWER, d)
             elapsed = time.time() - start
             print(
                 "info depth",
@@ -101,19 +119,18 @@ def mate_loop(
                 "pv",
                 " ".join(pv(searcher, hist[-1], include_scores=False)),
             )
-            if score >= sunfish.MATE_LOWER:
+            if score >= molafish.MATE_LOWER:
                 break
         if elapsed > max_movetime:
             break
         if stop_event.is_set():
             break
     move = searcher.tp_move.get(hist[-1])
-    move_str = render_move(move, white_pov=len(hist) % 2 == 1)
+    move_str = render_move(move)
     print("bestmove", move_str)
 
 
 def perft(pos, depth, debug=False):
-
     def _perft_count(pos, depth):
         # Check that we didn't get to an illegal position
         if can_kill_king(pos):
@@ -129,7 +146,7 @@ def perft(pos, depth, debug=False):
 
     total = 0
     for move in pos.gen_moves():
-        move_uci = render_move(move, get_color(pos) == WHITE)
+        move_uci = render_move(move)
         cnt = _perft_count(pos.move(move), depth - 1)
         if cnt != -1:
             print(f"{move_uci}: {cnt}")
@@ -138,13 +155,13 @@ def perft(pos, depth, debug=False):
     print("Nodes searched:", total)
 
 
-def run(sunfish_module, startpos):
-    global sunfish
-    sunfish = sunfish_module
+def run(molafish_module, startpos):
+    global molafish
+    molafish = molafish_module
 
     debug = False
     hist = [startpos]
-    searcher = sunfish.Searcher()
+    searcher = molafish.Searcher()
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         # Noop future to get started
@@ -178,9 +195,9 @@ def run(sunfish_module, startpos):
                 go_future.result(timeout=0)
 
                 if args[0] == "uci":
-                    print(f"id name {sunfish.version}")
-                    for attr, (lo, hi) in sunfish.opt_ranges.items():
-                        default = getattr(sunfish, attr)
+                    print(f"id name {molafish.version}")
+                    for attr, (lo, hi) in molafish.opt_ranges.items():
+                        default = getattr(molafish, attr)
                         print(
                             f"option name {attr} type spin default {default} min {lo} max {hi}"
                         )
@@ -188,7 +205,7 @@ def run(sunfish_module, startpos):
 
                 elif args[0] == "setoption":
                     _, uci_key, _, uci_value = args[1:]
-                    setattr(sunfish, uci_key, int(uci_value))
+                    setattr(molafish, uci_key, int(uci_value))
 
                 # FIXME: It seems we should reply to "isready" even while thinking.
                 # See: https://talkchess.com/forum3/viewtopic.php?f=7&t=81233&start=10
@@ -201,18 +218,20 @@ def run(sunfish_module, startpos):
                 elif args[:2] == ["position", "startpos"]:
                     hist = [startpos]
                     for ply, move in enumerate(args[3:]):
-                        hist.append(hist[-1].move(parse_move(move, ply % 2 == 0)))
+                        hist.append(hist[-1].move(parse_move(move, hist[-1])))
 
-                elif args[:2] == ["position", "fen"]:
-                    pos = from_fen(*args[2:8])
-                    hist = [pos] if get_color(pos) == WHITE else [pos.rotate(), pos]
-                    if len(args) > 8:
-                        assert args[8] == "moves"
-                        for move in args[9:]:
-                            hist.append(hist[-1].move(parse_move(move, len(hist) % 2 == 1)))
+                # TODO: Implement 'from_fen' for mf
+
+                # elif args[:2] == ["position", "fen"]:
+                #     pos = from_fen(*args[2:8])
+                #     hist = [pos] if get_color(pos) == WHITE else [pos.rotate(), pos]
+                #     if len(args) > 8:
+                #         assert args[8] == "moves"
+                #         for move in args[9:]:
+                #             hist.append(hist[-1].move(parse_move(move)))
 
                 elif args[0] == "go":
-                    think = 10**6
+                    think = 10 ** 6
                     max_depth = 100
                     loop = go_loop
 
@@ -225,9 +244,12 @@ def run(sunfish_module, startpos):
 
                     elif args[1] == "wtime":
                         wtime, btime, winc, binc = [int(a) / 1000 for a in args[2::2]]
-                        # we always consider ourselves white, but uci doesn't
-                        if len(hist) % 2 == 0:
-                            wtime, winc = btime, binc
+
+                        # mf: No longer true
+                        # # we always consider ourselves white, but uci doesn't
+                        # if len(hist) % 2 == 0:
+                        #     wtime, winc = btime, binc
+
                         think = min(wtime / 40 + winc, wtime / 2 - 1)
                         # let's go fast for the first moves
                         if len(hist) < 3:
@@ -275,36 +297,52 @@ def run(sunfish_module, startpos):
 WHITE, BLACK = range(2)
 
 
-def from_fen(board, color, castling, enpas, _hclock, _fclock):
-    board = re.sub(r"\d", (lambda m: "." * int(m.group(0))), board)
-    board = list(21 * " " + "  ".join(board.split("/")) + 21 * " ")
-    board[9::10] = ["\n"] * 12
-    board = "".join(board)
-    wc = ("Q" in castling, "K" in castling)
-    bc = ("k" in castling, "q" in castling)
-    ep = sunfish.parse(enpas) if enpas != "-" else 0
-    if hasattr(sunfish, 'features'):
-        wf, bf = sunfish.features(board)
-        pos = sunfish.Position(board, 0, wf, bf, wc, bc, ep, 0)
-        pos = pos._replace(score=pos.calculate_score())
-    else:
-        score = sum(sunfish.pst[c][i] for i, c in enumerate(board) if c.isupper())
-        score -= sum(sunfish.pst[c.upper()][119-i] for i, c in enumerate(board) if c.islower())
-        pos = sunfish.Position(board, score, wc, bc, ep, 0)
-    return pos if color == 'w' else pos.rotate()
+# TODO: Refactor 'from_fen' once molafish board structure has settled
+
+# def from_fen(board, color, castling, enpas, _hclock, _fclock):
+#     board = re.sub(r"\d", (lambda m: "." * int(m.group(0))), board)
+#     board = list(21 * " " + "  ".join(board.split("/")) + 21 * " ")
+#     board[9::10] = ["\n"] * 12
+#     board = "".join(board)
+#     wc = ("Q" in castling, "K" in castling)
+#     bc = ("k" in castling, "q" in castling)
+#     ep = molafish.parse(enpas) if enpas != "-" else 0
+#     if hasattr(molafish, 'features'):
+#         wf, bf = molafish.features(board)
+#         pos = molafish.Position(board, 0, wf, bf, wc, bc, ep, 0)
+#         pos = pos._replace(score=pos.calculate_score())
+#     else:
+#         score = sum(molafish.pst[c][i] for i, c in enumerate(board) if c.isupper())
+#         score -= sum(molafish.pst[c.upper()][119-i] for i, c in enumerate(board) if c.islower())
+#         pos = molafish.Position(board, score, wc, bc, ep, 0)
+#     return pos if color == 'w' else pos.rotate()
 
 
+# def get_color(pos):
+#     """A slightly hacky way to to get the color from a molafish position"""
+#     return BLACK if pos.board.startswith("\n") else WHITE
 def get_color(pos):
-    """A slightly hacky way to to get the color from a sunfish position"""
-    return BLACK if pos.board.startswith("\n") else WHITE
+    return BLACK if pos.player == 1 else WHITE
 
 
+# def can_kill_king(pos):
+#     # If we just checked for opponent moves capturing the king, we would miss
+#     # captures in case of illegal castling.
+#     #MATE_LOWER = 60_000 - 10 * 929
+#     #return any(pos.value(m) >= MATE_LOWER for m in pos.gen_moves())
+#     return any(pos.board[m.j] == 'k' or abs(m.j - pos.kp) < 2 for m in pos.gen_moves())
 def can_kill_king(pos):
     # If we just checked for opponent moves capturing the king, we would miss
     # captures in case of illegal castling.
-    #MATE_LOWER = 60_000 - 10 * 929
-    #return any(pos.value(m) >= MATE_LOWER for m in pos.gen_moves())
-    return any(pos.board[m.j] == 'k' or abs(m.j - pos.kp) < 2 for m in pos.gen_moves())
+    # MATE_LOWER = 60_000 - 10 * 929
+    # return any(pos.value(m) >= MATE_LOWER for m in pos.gen_moves())
+    opponents_king = pos.board[1 - pos.player][6]
+    castling_check_squares = (pos.kp | (pos.kp >> 1) | (pos.kp << 1))
+    return any(
+        (m.j & opponents_king)
+        or (pos.kp and (m.j & castling_check_squares))
+        for m in pos.gen_moves()
+    )
 
 
 def pv(searcher, pos, include_scores=True, include_loop=False):
@@ -324,7 +362,7 @@ def pv(searcher, pos, include_scores=True, include_loop=False):
         # The tp may have illegal moves, given lower depths don't detect king killing
         if move is None or can_kill_king(pos.move(move)):
             break
-        res.append(render_move(move, get_color(pos) == WHITE))
+        res.append(render_move(move))
         pos, color = pos.move(move), 1 - color
 
         if hasattr(pos, "wf"):
