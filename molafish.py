@@ -5,13 +5,13 @@ import time, math
 from itertools import count
 from collections import namedtuple, defaultdict
 
-version = "molafish v0.11"
+version = "molafish v0.12"
 
 ###############################################################################
 # Piece-Square tables. Tune these to change sunfish's behaviour
 ###############################################################################
 # TODO: Compression test
-piece = [0, 100, 479, 280, 320, 929, 60000]     # P,R,N,B,Q,K
+piece = [0, 100, 479, 280, 320, 929, 60000]        # P,R,N,B,Q,K
 pst = [
     tuple(0 for _ in range(64)),                # [0] None
     (    0,   0,   0,   0,   0,   0,   0,   0,  # [1] Pawn
@@ -73,7 +73,6 @@ pst = [
 # as a new list to match white/black indexing
 pst = [pst, [table[::-1] for table in pst]]
 
-
 # (Currently not needed / seemed to slowed down 'value' method)
 # # Convert each list in the nested list structure to a dictionary
 # pst = [[{1 << i: score for i, score in enumerate(piece_table)}
@@ -117,6 +116,7 @@ PROMOTIONS = [3, 4, 2, 5]
 PAWN_RANKS = [RANK_2, RANK_7]
 ROOK_CORNERS = [[A1, H1], [A8, H8]]
 
+# TODO: Single tuple may speed up search
 initial = (
     (
         0xffff,                 #  [0][0] All White Pieces
@@ -175,18 +175,18 @@ crawler_attacks = [{'fwd':{}, 'cap':{}},  # [0] White Pawn forwards and captures
                    {'fwd':{}, 'cap':{}},  # [1] Black Pawn forwards and captures
                    {}, {}, {}, {}, {}]    # [2-6] Rook, Knight, Bishop, Queen, King
 
-for p in [0, 1, 3, 6]:
+for piece in [0, 1, 3, 6]:
     for square_index in range(65):
-        mt = crawler_attacks[p]
+        mt = crawler_attacks[piece]
         i = 1 << square_index
         # wPawn, bPawn
-        if p in [0, 1]:
-            d = directions[p]
-            mt["fwd"][i] = d[0](i) | (d[1](i) if i & PAWN_RANKS[p] else 0)
+        if piece in [0, 1]:
+            d = directions[piece]
+            mt["fwd"][i] = d[0](i) | (d[1](i) if i & PAWN_RANKS[piece] else 0)
             mt["cap"][i] = d[2](i) | d[3](i)
         # Horse, King
         else:
-            mt[i] = sum(d(i) for d in directions[p])
+            mt[i] = sum(d(i) for d in directions[piece])
 
 
 # Slider attack tables (Rook, Bishop, Queen).
@@ -643,3 +643,4 @@ if __name__ == '__main__':
     tools.uci.run(sys.modules[__name__], hist[-1])
     sys.exit()
     # minifier-hide end
+
