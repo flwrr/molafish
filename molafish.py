@@ -5,7 +5,7 @@ import time, math
 from itertools import count
 from collections import namedtuple, defaultdict
 
-version = "molafish v0.03"
+version = "molafish v0.04"
 
 ###############################################################################
 # Piece-Square tables. Tune these to change sunfish's behaviour
@@ -168,7 +168,7 @@ opt_ranges = dict(
 ###############################################################################
 
 
-Move = namedtuple("Move", "i j prom")
+Move = namedtuple("Move", "i j prom p q")
 
 
 class Position(namedtuple("Position", "board score wc bc ep kp player")):
@@ -210,23 +210,23 @@ class Position(namedtuple("Position", "board score wc bc ep kp player")):
                         # promotion
                         if j & (RANK_1 | RANK_8):
                             for prom in [3, 4, 2, 5]:   # N,B,R,Q
-                                yield Move(i, j, prom)
+                                yield Move(i, j, prom, p, 0)
                             continue
-                        yield Move(i, j, 0)
+                        yield Move(i, j, 0, p, 0)
                     # Knight and King
                     elif p in [3, 6] and (j & ~own_pieces):
-                        yield Move(i, j, 0)
+                        yield Move(i, j, 0, p, 0)
                     # Rook, Bishop, Queen (generate rays)
                     else:
                         while j & ~own_pieces:
-                            yield Move(i, j, 0)
+                            yield Move(i, j, 0, p, 0)
                             if j & opp_pieces: break
                             # Castling, by sliding the rook next to the king
                             rook_a, rook_h = ROOK_CORNERS[bw][0], ROOK_CORNERS[bw][1]
                             if i == rook_a and (e(j) & self.board[bw][6]) and castle_ok[bw][0]:
-                                yield Move(e(j), w(j), 0)
+                                yield Move(e(j), w(j), 0, 6, 0)
                             if i == rook_h and (w(j) & self.board[bw][6]) and castle_ok[bw][1]:
-                                yield Move(w(j), e(j), 0)
+                                yield Move(w(j), e(j), 0, 6, 0)
                             j = d(j)
 
     def rotate(self, nullmove=False):
@@ -240,24 +240,21 @@ class Position(namedtuple("Position", "board score wc bc ep kp player")):
         )
 
     def move(self, move):
-        origin, dest, prom = move
-        p, q = None, None   # p = piece moved, q = piece captured
+        origin, dest, prom, p, q = move
         # Copy variables and reset ep and kp
         board = [list(self.board[0]), list(self.board[1]), self.board[2]]   # deep copy
         cr, ep, kp = [self.wc, self.bc], 0, 0   # cr = castling rights
-        score = self.score + self.value(move)
-        # TODO: Add piece_moved, piece_captured to move tuple
-        # Actual move and captures
-        for p_type, bb in enumerate(board[self.player][1:], start=1):
-            if origin & bb:
-                board[self.player][p_type] ^= origin | dest
-                board[self.player][0] ^= origin | dest
-                p = p_type
-        for p_type, bb in enumerate(board[1 - self.player][1:], start=1):
-            if dest & bb:
-                board[1 - self.player][p_type] ^= dest
-                board[1 - self.player][0] ^= dest
-                q = p_type
+        # Actual move (update bitboards)
+        board[self.player][p] ^= origin | dest
+        board[self.player][0] ^= origin | dest
+        # Update opponent's bitboards
+        if q == 0 and dest & self.board[1 - self.player][0]:
+            for p_type, bb in enumerate(board[1 - self.player][1:], start=1):
+                if dest & bb:
+                    board[1 - self.player][p_type] ^= dest
+                    board[1 - self.player][0] ^= dest
+                    q = p_type
+        score = self.score + self.value((origin, dest, prom, p, q))
         # Castling rights, we move the rook or capture the opponent's
         if origin == A1 or dest == A1: cr[0] = (False, cr[0][1])
         if origin == H1 or dest == H1: cr[0] = (cr[0][0], False)
@@ -293,19 +290,18 @@ class Position(namedtuple("Position", "board score wc bc ep kp player")):
                         -score, cr[0], cr[1], ep, kp, (self.player ^ 1))
 
     def value(self, move):
-        origin, dest, prom = move
+        origin, dest, prom, p, q = move
+        if q == 0 and dest & self.board[1-self.player][0]:
+            for p_type, bb in enumerate(self.board[1-self.player][1:], start=1):
+                if dest & bb:
+                    q = p_type
+                    break
         # convert origin,destination to indices i,j (A1 = 0, H8 = 63)
         i, j = origin.bit_length()-1, dest.bit_length()-1
-        p, q = None, None
-        # TODO: Include piece moved, piece captured in move tuple
-        for p_type, bb in enumerate(self.board[self.player][1:], start=1):
-            if origin & bb: p = p_type
-        for p_type, bb in enumerate(self.board[1 - self.player][1:], start=1):
-            if dest & bb: q = p_type
         # Actual move
         score = pst[self.player][p][j] - pst[self.player][p][i]
         # Capture
-        if q is not None:
+        if q:   # we could fill pst[0] with 0s to avoid branching
             score += pst[1 - self.player][q][j]
         # Castling check detection (6=King)
         if self.kp and abs(j - (self.kp.bit_length()-1)) < 2:
